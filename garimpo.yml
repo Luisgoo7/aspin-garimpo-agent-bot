@@ -1,0 +1,78 @@
+name: Garimpo ASPIN
+
+on:
+  schedule:
+    # GitHub usa UTC; 05 minutos depois de cada hora reduz colisões no início do horário.
+    - cron: '5 * * * *'
+  workflow_dispatch:
+    inputs:
+      lookback_minutes:
+        description: 'Janela de coleta em minutos'
+        required: false
+        default: '60'
+        type: string
+
+concurrency:
+  group: aspin-garimpo-collector
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    name: Coletar e classificar oportunidades
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    env:
+      APP_ENV: production
+      LOG_LEVEL: INFO
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      DATAJUD_API_KEY: ${{ secrets.DATAJUD_API_KEY }}
+      DATAJUD_TRIBUNALS: ${{ vars.DATAJUD_TRIBUNALS || 'api_publica_trf1' }}
+      POLL_INTERVAL_MINUTES: '60'
+      STATUS_INTERVAL_MINUTES: '120'
+      MIN_CONFIDENCE: '0.78'
+      MIN_OPPORTUNITY_AMOUNT: '100000'
+      ASPIN_COMMISSION_RATE: '0.05'
+      DATAJUD_PAGE_SIZE: '50'
+      MAX_CLASSIFY_PER_CYCLE: '120'
+      INITIAL_LOOKBACK_DAYS: '7'
+      INCREMENTAL_LOOKBACK_MINUTES: '60'
+
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependências
+        run: python -m pip install -r requirements.txt
+
+      - name: Validar sintaxe
+        run: python -m py_compile app/*.py
+
+      - name: Executar um ciclo
+        env:
+          LOOKBACK_MINUTES: ${{ inputs.lookback_minutes || '60' }}
+        run: |
+          python - <<'PY'
+          import asyncio
+          import os
+          from app.worker import poll_once
+
+          lookback = int(os.environ.get("LOOKBACK_MINUTES", "60"))
+          found = asyncio.run(poll_once(lookback))
+          print(f"Ciclo do GitHub Actions concluído: oportunidades={found}")
+          PY
