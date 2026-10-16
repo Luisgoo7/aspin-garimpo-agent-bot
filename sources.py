@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 import json
 import logging
+import time
 import httpx
 from .config import settings
 from .opportunity import KEYWORDS
@@ -54,6 +55,17 @@ def persist_source(row: dict) -> bool:
     import psycopg
     source = row.get('source') or 'djen'
     external_id = str(row.get('external_id') or row.get('hash') or row.get('id') or row.get('numeroComunicacao') or row.get('link'))
-    with psycopg.connect(settings.database_url) as conn:
+    last_error = None
+    for attempt in range(4):
+        try:
+            conn = psycopg.connect(settings.database_url, connect_timeout=15)
+            break
+        except psycopg.OperationalError as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(2 ** attempt)
+    else:
+        raise last_error
+    with conn:
         cur = conn.execute('''insert into public.source_documents(source,tribunal_alias,external_id,process_number,published_at,title,text_excerpt,document_url,raw_data) values(%s,%s,%s,%s,%s,%s,%s,%s,%s) on conflict(source,external_id) do update set text_excerpt=excluded.text_excerpt,raw_data=excluded.raw_data returning (xmax = 0)''', (source, row.get('siglaTribunal'), external_id, row.get('numero_processo') or row.get('numeroProcesso'), row.get('data_disponibilizacao') or row.get('dataDisponibilizacao'), row.get('tipoComunicacao') or row.get('title'), row.get('texto') or row.get('text_excerpt') or '', row.get('link') or row.get('document_url'), json.dumps(row)))
         return bool(cur.fetchone()[0])

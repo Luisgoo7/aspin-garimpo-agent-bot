@@ -1,7 +1,9 @@
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from .config import settings
 from .datajud import DataJudClient
 from .llm import LLMClassifier
@@ -11,6 +13,22 @@ from .sources import search_djen, probe_tjsp_pages, persist_source
 
 log = logging.getLogger(__name__)
 
+TRIBUNAL_CITIES = {
+    "trf1": ("Brasília", "trf1"),
+    "api_publica_trf1": ("Brasília", "trf1"),
+    "trf2": ("Rio de Janeiro", "trf2"),
+    "trf3": ("São Paulo", "trf3"),
+    "trf4": ("Porto Alegre", "trf4"),
+    "trf5": ("Recife", "trf5"),
+    "trf6": ("Belo Horizonte", "trf6"),
+}
+
+
+def location_name(alias: str) -> str:
+    key = str(alias or "").strip().lower()
+    city, code = TRIBUNAL_CITIES.get(key, (str(alias or "não informado").upper(), key))
+    return f"{city} ({code})"
+
 
 def build_query(since: datetime) -> dict:
     return {"size": settings.datajud_page_size, "track_total_hits": False, "_source": ["numeroProcesso", "movimentos", "classe", "assuntos", "partes", "dataHoraUltimaAtualizacao", "url"], "sort": [{"dataHoraUltimaAtualizacao": {"order": "desc", "unmapped_type": "date"}}], "query": {"bool": {"filter": [{"range": {"movimentos.dataHora": {"gte": since.isoformat()}}}], "should": [{"match_phrase": {"movimentos.nome": term}} for term in KEYWORDS], "minimum_should_match": 1}}}
@@ -18,7 +36,15 @@ def build_query(since: datetime) -> dict:
 
 def _connect():
     import psycopg
-    return psycopg.connect(settings.database_url)
+    last_error = None
+    for attempt in range(4):
+        try:
+            return psycopg.connect(settings.database_url, connect_timeout=15)
+        except psycopg.OperationalError as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(2 ** attempt)
+    raise last_error
 
 
 def _db_datetime(value):
@@ -40,6 +66,22 @@ def _score(value) -> float:
     if score > 1:
         score /= 100
     return min(0.9999, max(0.0, score))
+
+
+def _amount(value) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace("R$", "").replace(" ", "")
+    if "," in text and "." in text:
+        text = text.replace(".", "").replace(",", ".")
+    else:
+        text = text.replace(",", ".")
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
 
 
 def _tribunal_id(cur, alias: str):
@@ -117,6 +159,10 @@ class Cycle:
             return
         if not result.get("is_opportunity"):
             return
+        amount = _amount(result.get("amount"))
+        if amount is None or amount < settings.min_opportunity_amount:
+            log.info("Oportunidade descartada por valor ausente ou abaixo do minimo: %s", result.get("amount"))
+            return
         try:
             opp_id = save_opportunity(source, alias, result, text)
         except Exception as exc:
@@ -130,7 +176,11 @@ class Cycle:
         if settings.telegram_bot_token and settings.telegram_chat_id and score >= settings.min_confidence:
             try:
                 score_pct = f"{score:.0%}"
-                await send_alert(f"🚨 ASPIN | Nova oportunidade\n\n🏛️ Tribunal: {alias}\n📌 Tipo: {result.get('requisition_type') or 'não informado'}\n💰 Valor: {result.get('amount') or 'não informado'}\n👤 Beneficiário: {result.get('beneficiary') or 'não informado'}\n🏢 Devedor: {result.get('debtor_entity') or 'não informado'}\n📄 Processo: {source.get('numeroProcesso') or source.get('url') or '-'}\n🎯 Confiança: {score_pct}\n\n🧠 Motivo\n{result.get('reason') or 'não informado'}\n\n🔎 Evidência\n“{result.get('evidence_quote') or 'não informada'}”")
+                amount_text = f"R$ {amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                commission = amount * settings.aspin_commission_rate
+                commission_text = f"R$ {commission:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                commission_pct = f"{settings.aspin_commission_rate:.0%}"
+                await send_alert(f"🚨 ASPIN | Nova oportunidade\n\n📍 Cidade: {location_name(alias)}\n📌 Tipo: {result.get('requisition_type') or 'não informado'}\n💰 Valor líquido considerado: {amount_text}\n💼 Retorno estimado ASPIN ({commission_pct}): {commission_text}\n👤 Beneficiário: {result.get('beneficiary') or 'não informado'}\n🏢 Devedor: {result.get('debtor_entity') or 'não informado'}\n📄 Processo: {source.get('numeroProcesso') or source.get('url') or '-'}\n🎯 Confiança: {score_pct}\n\n🧠 Motivo\n{result.get('reason') or 'não informado'}\n\n🔎 Evidência\n“{result.get('evidence_quote') or 'não informada'}”")
                 mark_alerted(opp_id)
                 self.alerts += 1
             except Exception as exc:
@@ -231,13 +281,33 @@ async def poll_once(lookback_minutes: int | None = None) -> int:
 
 async def run_forever() -> None:
     first = True
+    loop = asyncio.get_running_loop()
+    next_run = loop.time()
+    cycle_timeout = max(300, settings.poll_interval_minutes * 60 - 60)
+    empty_cycles = 0
+    last_status_slot = None
     while True:
         try:
-            await poll_once(None if first else settings.incremental_lookback_minutes)
+            found = await asyncio.wait_for(
+                poll_once(None if first else settings.incremental_lookback_minutes),
+                timeout=cycle_timeout,
+            )
+            if found:
+                empty_cycles = 0
+            else:
+                empty_cycles += 1
+            now_brasilia = datetime.now(ZoneInfo("America/Sao_Paulo"))
+            status_slot = now_brasilia.strftime("%Y-%m-%d-%H")
+            if now_brasilia.hour % 2 == 0 and empty_cycles >= 2 and status_slot != last_status_slot:
+                await send_alert("ASPIN | Bot em funcionamento:\n\nNenhuma oportunidade válida nos últimos dois ciclos.")
+                last_status_slot = status_slot
+        except asyncio.TimeoutError:
+            log.error("Ciclo excedeu o limite de %s segundos; proximo ciclo sera mantido", cycle_timeout)
         except Exception:
             log.exception("Ciclo falhou")
         first = False
-        await asyncio.sleep(settings.poll_interval_minutes * 60)
+        next_run += settings.poll_interval_minutes * 60
+        await asyncio.sleep(max(0, next_run - loop.time()))
 
 if __name__ == "__main__":
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")

@@ -4,6 +4,9 @@ KEYWORDS = [
     "ofício requisitório", "oficio requisitorio", "requisição de pagamento",
     "requisicao de pagamento", "expedição de rpv", "expedicao de rpv",
     "precatório expedido", "precatorio expedido", "rpv expedida",
+    "ofício de pagamento", "oficio de pagamento", "ordem de pagamento",
+    "requisição expedida", "requisicao expedida", "precatório", "precatorio",
+    "requisição", "requisicao", "r.p.v.", "precatório alimentar",
 ]
 
 def keyword_score(text: str) -> float:
