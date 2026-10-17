@@ -14,8 +14,8 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     nvidia_api_key: str = ""
     groq_model: str = "openai/gpt-oss-20b"
-    gemini_model: str = "gemini-2.5-flash"
-    nvidia_model: str = "meta/llama-3.1-8b-instruct"
+    gemini_model: str = "gemini-3.8-flash"
+    nvidia_model: str = "openai/gpt-oss-20b"
     datajud_api_key: str = ""
     datajud_tribunals: str = "api_publica_trf1"
     enable_datajud: bool = True

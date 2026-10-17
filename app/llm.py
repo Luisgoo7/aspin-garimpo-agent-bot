@@ -17,8 +17,8 @@ from .config import settings
 log = logging.getLogger(__name__)
 
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
-DEFAULT_NVIDIA_MODEL = "meta/llama-3.1-8b-instruct"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+DEFAULT_NVIDIA_MODEL = "openai/gpt-oss-20b"
 MAX_RETRIES = 3
 MAX_RETRY_DELAY = 60.0
 
@@ -527,6 +527,14 @@ class LLMClassifier:
                         await asyncio.sleep(_retry_delay(response, tentativa))
                         continue
                     raise ultimo_erro
+                if status == 400:
+                    try:
+                        code = response.json().get("error", {}).get("code")
+                    except (ValueError, TypeError, AttributeError):
+                        code = None
+                    if code in ("json_validate_failed", "failed_generation") and tentativa < MAX_RETRIES - 1:
+                        await asyncio.sleep(_retry_delay(response, tentativa))
+                        continue
                 if status < 200 or status >= 300:
                     raise _ProviderError("HTTP", status)
                 try:

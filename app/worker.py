@@ -6,10 +6,11 @@ from datetime import date, datetime, timedelta, timezone
 
 from .config import settings
 from .datajud import DataJudClient
-from .llm import LLMClassifier
+from .llm import LLMClassifier, _AMOUNT_CONTEXT_RE, _normalize_amount
 from .opportunity import KEYWORDS, canonical_alias, canonical_cnj, clean_text, parse_amount
 from .sources import search_djen, probe_tjsp_pages
 from .telegram_bot import send_alert
+from .source_retry import recover_queries
 from . import storage
 
 log = logging.getLogger(__name__)
@@ -150,6 +151,12 @@ async def _process_queue(metrics: dict, errors: list[str]):
                 storage.finish_document(doc, "cancelled")
                 continue
             text = clean_text(doc.get("text_excerpt") or "")
+            amounts = [_normalize_amount(match.group(1)) for match in _AMOUNT_CONTEXT_RE.finditer(text)]
+            amounts = [amount for amount in amounts if amount is not None and amount >= 0]
+            if amounts and max(amounts) < settings.min_opportunity_amount:
+                storage.finish_document(doc, "below_minimum", {"rule": "todos_valores_explicitamente_abaixo_do_minimo", "max_amount": max(amounts)})
+                metrics["below_minimum"] += 1
+                continue
             # Nunca marca como concluído antes da resposta da IA e persistência.
             result = await classifier.classify(text[:18000])
             metrics["classified"] += 1
@@ -158,6 +165,8 @@ async def _process_queue(metrics: dict, errors: list[str]):
                 storage.finish_document(doc, "retry", error=reason)
                 errors.append("ia: " + reason)
                 # Circuit breaker: não esgota todos os documentos se provedores estão indisponíveis.
+                if "resposta" in reason or "ValueError" in reason:
+                    continue
                 break
             if not result.get("is_opportunity"):
                 status = "needs_enrichment" if result.get("needs_enrichment") or result.get("need_enrichment") else "rejected"
@@ -234,6 +243,7 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
             for row in batch.rows:
                 storage.upsert_document(row)
             storage.set_state("djen_cursor", batch.cursor or {})
+            await recover_queries(batch, metrics, errors, now)
             await _collect_datajud(since, metrics, errors)
             if settings.enable_tjsp_probe:
                 # Monitoramento explicitamente separado da descoberta.
@@ -247,7 +257,7 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
             except Exception as exc:
                 errors.append("status_telegram: " + storage.safe_error(exc))
             outcome = "degraded" if errors else "partial" if metrics["limited"] else "success"
-            if not errors and not metrics["limited"]:
+            if batch.cursor is None:
                 covered = min(now, datetime.combine(query_until + timedelta(days=1), datetime.min.time(), timezone.utc))
                 storage.set_state("last_collection", {"at": covered.isoformat()})
             storage.set_state("last_health", {"at": datetime.now(timezone.utc).isoformat(), "outcome": outcome})
@@ -275,11 +285,15 @@ async def run_forever():
     require_configuration()
     while True:
         started = asyncio.get_running_loop().time()
+        interval = settings.poll_interval_minutes
         try:
-            await asyncio.wait_for(run_cycle(), timeout=settings.cycle_timeout_seconds)
+            result = await asyncio.wait_for(run_cycle(), timeout=settings.cycle_timeout_seconds)
+            if result["outcome"] in ("partial", "degraded", "failed"):
+                interval = min(interval, 5)
         except Exception as exc:
             log.error("Ciclo não concluído: %s", storage.safe_error(exc))
-        delay = settings.poll_interval_minutes * 60 - (asyncio.get_running_loop().time() - started)
+            interval = min(interval, 5)
+        delay = interval * 60 - (asyncio.get_running_loop().time() - started)
         await asyncio.sleep(max(0, delay))
 
 

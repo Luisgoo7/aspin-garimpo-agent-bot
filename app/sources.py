@@ -5,7 +5,7 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
@@ -44,6 +44,7 @@ class DjenResult:
     pages: int = 0
     limited: bool = False
     cursor: dict | None = None
+    retry_cursors: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -258,12 +259,13 @@ async def search_djen(
     since: date,
     until: date,
     cursor: dict | None = None,
+    stop_after_query: bool = False,
 ) -> DjenResult:
     """Consulta a API DJEN por termo e por dia, do dia mais novo para o antigo.
 
-    O cursor aponta sempre para o próximo request. Em falha de rede/HTTP/shape,
-    ele permanece apontando para a tentativa atual, permitindo retomar sem pular
-    uma página. Limites de ciclo avançam apenas depois de uma página inteira.
+    Falhas isoladas ficam em retry_cursors sem bloquear outras consultas.
+    Bloqueios globais e limites preservam a tentativa atual. stop_after_query
+    restringe uma recuperação ao mesmo termo/dia, evitando repetir outras buscas.
     """
 
     result = DjenResult(rows=[], errors=[], totals={})
@@ -315,6 +317,7 @@ async def search_djen(
     unique_rows: dict[str, dict] = {}
     request_count = [0]
     stop_all = False
+    page_counts: dict[str, int] = {}
     current_cursor: dict | None = _make_cursor(
         since, until, date_index, term_index, page
     )
@@ -329,7 +332,7 @@ async def search_djen(
                 term = DJEN_TERMS[term_index]
                 key = f"{day.isoformat()}:{term}"
                 result.totals.setdefault(key, 0)
-                page_in_cycle = 0
+                page_in_cycle = page_counts.get(key, 0)
                 # count é o total da consulta; ao retomar, as páginas anteriores
                 # são representadas pelo deslocamento nominal page-1.
                 seen_for_query = (page - 1) * page_size
@@ -370,10 +373,14 @@ async def search_djen(
                         break
                     payload = fetched.payload
                     if payload is None:
-                        # Erro de rede/status/JSON: não avançar o cursor da
-                        # tentativa atual. O caller poderá retomar exatamente aqui.
-                        result.limited = True
-                        stop_all = True
+                        result.retry_cursors.append(current_cursor)
+                        if stop_after_query:
+                            result.limited = True
+                            stop_all = True
+                            break
+                        current_cursor = _next_cursor(since, until, date_index, term_index, page, False, date_count)
+                        term_index += 1
+                        page = 1
                         break
 
                     items = payload.get("items")
@@ -427,6 +434,7 @@ async def search_djen(
                     empty_retry_for_page = False
 
                     page_in_cycle += 1
+                    page_counts[key] = page_in_cycle
                     seen_for_query += len(items)
                     # Uma página é a unidade de limite: todos os seus itens são
                     # preservados antes de decidir o teto de documentos.
@@ -453,6 +461,11 @@ async def search_djen(
                         has_more,
                         date_count,
                     )
+
+                    if stop_after_query and not has_more:
+                        current_cursor = None
+                        stop_all = True
+                        break
 
                     # Limites de página e request são por ciclo, não globais à
                     # janela. A retomada começa na página seguinte sem saltar.
@@ -499,7 +512,7 @@ async def search_djen(
         result.limited = True
     else:
         result.cursor = None
-        result.limited = False
+        result.limited = bool(result.retry_cursors)
     return result
 
 
