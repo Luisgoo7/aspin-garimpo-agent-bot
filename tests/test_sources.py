@@ -210,3 +210,37 @@ def test_max_pages_is_per_cycle_and_cursor_preserves_original_window(monkeypatch
     assert result.cursor["since"] == "2026-01-01"
     assert result.cursor["until"] == "2026-01-02"
     assert result.cursor["page"] == 2
+
+
+def test_isolated_http_500_is_queued_without_blocking_other_terms(monkeypatch):
+    configure_settings(monkeypatch)
+    first,second=sources.DJEN_TERMS[:2]
+    def responder(params,n):
+        if params['texto']==first:return 500,{}
+        if params['texto']==second:return 200,{'count':1,'items':[{'id':'credit-real'}]}
+        return 200,{'count':0,'items':[]}
+    calls=install_http_mock(monkeypatch,responder)
+    result=run_search(date(2026,1,1),date(2026,1,1))
+    assert [r['id'] for r in result.rows]==['credit-real']
+    assert result.retry_cursors[0]['term_index']==0
+    assert result.retry_cursors[0]['page']==1
+    assert result.cursor is None and result.limited
+    assert len(calls)==8
+
+
+def test_recovery_stays_in_original_query(monkeypatch):
+    configure_settings(monkeypatch)
+    calls=install_http_mock(monkeypatch,lambda params,n:(200,{'count':1,'items':[{'id':'recovered'}]}))
+    cursor={'since':'2026-01-01','until':'2026-01-01','date_index':0,'term_index':3,'page':1}
+    result=run_search(date(2026,1,1),date(2026,1,1),cursor,stop_after_query=True)
+    assert len(calls)==1 and result.cursor is None
+    assert result.rows[0]['id']=='recovered'
+
+
+def test_two_page_cap_not_reset_between_pages(monkeypatch):
+    configure_settings(monkeypatch,djen_max_pages=2)
+    calls=install_http_mock(monkeypatch,lambda params,n:(200,{'count':20,'items':[{'id':str(n)+'a'},{'id':str(n)+'b'}]}))
+    result=run_search(date(2026,1,1),date(2026,1,1))
+    assert len(calls)==2
+    assert len(result.rows)==4
+    assert result.cursor['page']==3

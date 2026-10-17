@@ -224,3 +224,13 @@ def test_publicacao_com_principal_e_honorarios_nao_soma():
     assert result['is_opportunity'] is True
     assert result['amount'] == 135654.57
     assert result['evidence_quote'] in text
+
+
+def test_json_generation_rejection_retries(monkeypatch):
+    respostas=[RespostaFake(400,{'error':{'code':'json_validate_failed'}}),RespostaFake(200,{'choices':[{'message':{'content':json.dumps(resposta_base())}}]})]
+    cliente=ClienteFake(respostas)
+    monkeypatch.setattr(llm.httpx,'AsyncClient',lambda timeout:cliente)
+    monkeypatch.setattr(llm.asyncio,'sleep',AsyncMock())
+    result=asyncio.run(llm.LLMClassifier()._post('https://api.groq.com/openai/v1/chat/completions',{},{}))
+    assert result['amount']=='R$ 1.234,56'
+    assert len(cliente.chamadas)==2

@@ -196,3 +196,31 @@ async def test_end_to_end_real_database_mocked_external_services(test_db, monkey
     result2 = await worker.run_cycle(120)
     assert result2["opportunities"] == 0 and result2["alerts"] == 0
     assert sender.await_count == 2  # sem duplicar nem repetir status fora do intervalo
+
+
+def test_existing_unalerted_record_can_be_enriched(test_db):
+    storage.upsert_document(source_row())
+    doc=storage.claim_document()
+    id,created=storage.save_opportunity(doc,positive())
+    with storage.connect() as conn:
+        conn.execute("update public.opportunities set amount=null,potential_score=0.5,status='review' where id=%s",(id,))
+        conn.execute("update public.processes set cnj_number='1002747-62.2024.4.01.3600'")
+    enriched,new=storage.save_opportunity(doc,positive())
+    assert enriched==id and not new
+    assert float(storage.pending_alerts()[0]['amount'])==135654.57
+
+
+@pytest.mark.asyncio
+async def test_below_minimum_document_does_not_call_ai(monkeypatch):
+    doc={'id':'doc','processing_attempts':1,'text_excerpt':'RPV expedida no valor de R$ 5.000,00','raw_data':{}}
+    docs=iter([doc,None])
+    monkeypatch.setattr(storage,'claim_document',lambda:next(docs))
+    finished=[]
+    monkeypatch.setattr(storage,'finish_document',lambda d,status,*args,**kwargs:finished.append(status))
+    classifier=AsyncMock()
+    monkeypatch.setattr(worker.LLMClassifier,'classify',classifier)
+    metrics={'classified':0,'opportunities':0,'below_minimum':0}
+    await worker._process_queue(metrics,[])
+    assert finished==['below_minimum']
+    assert metrics['below_minimum']==1 and metrics['classified']==0
+    classifier.assert_not_awaited()
