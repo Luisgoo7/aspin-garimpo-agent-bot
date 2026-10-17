@@ -1,0 +1,197 @@
+import hashlib
+import json
+import time
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+
+from .config import settings
+from .opportunity import canonical_alias, canonical_cnj, clean_text, keyword_score
+
+LOCK_ID = 418739261
+
+
+def safe_error(exc: Exception) -> str:
+    """Não inclui URL, corpo HTTP, DSN ou credenciais na mensagem operacional."""
+    response = getattr(exc, "response", None)
+    code = getattr(response, "status_code", None)
+    return type(exc).__name__ + (f" HTTP {code}" if code else "")
+
+
+def connect():
+    for attempt in range(3):
+        try:
+            return psycopg.connect(settings.database_url, connect_timeout=15, row_factory=dict_row)
+        except psycopg.OperationalError:
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
+
+
+def ensure_schema():
+    root = Path(__file__).resolve().parent.parent
+    with connect() as conn:
+        for name in ("001_initial_schema.sql", "002_sources_and_runs.sql", "003_reliable_processing.sql"):
+            conn.execute((root / name).read_text(encoding="utf-8"))
+
+
+@contextmanager
+def collector_lock():
+    conn = connect()
+    conn.autocommit = True
+    try:
+        locked = conn.execute("select pg_try_advisory_lock(%s) as locked", (LOCK_ID,)).fetchone()["locked"]
+        yield locked
+    finally:
+        try:
+            conn.execute("select pg_advisory_unlock(%s)", (LOCK_ID,))
+        finally:
+            conn.close()
+
+
+def source_key(row: dict) -> str:
+    explicit = row.get("external_id") or row.get("hash") or row.get("id") or row.get("numeroComunicacao")
+    if explicit:
+        return str(explicit)
+    parts = [row.get("siglaTribunal"), row.get("numero_processo") or row.get("numeroProcesso"), row.get("data_disponibilizacao"), row.get("texto") or row.get("text_excerpt")]
+    return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
+
+
+def upsert_document(row: dict) -> str:
+    source = row.get("source") or "djen"
+    text = clean_text(row.get("texto") or row.get("text_excerpt") or "")
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    alias = canonical_alias(row.get("siglaTribunal") or row.get("tribunal_alias") or "djen")
+    cnj = canonical_cnj(row.get("numero_processo") or row.get("numeroProcesso") or "")
+    status = "pending" if keyword_score(text) > 0.25 and source != "tjsp_probe" else "ignored"
+    with connect() as conn:
+        record = conn.execute("""insert into public.source_documents
+            (source,tribunal_alias,external_id,process_number,published_at,title,text_excerpt,document_url,raw_data,content_hash,processing_status)
+            values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            on conflict(source,external_id) do update set
+            text_excerpt=excluded.text_excerpt,document_url=excluded.document_url,raw_data=excluded.raw_data,
+            content_hash=excluded.content_hash,updated_at=now(),
+            processing_status=case when source_documents.content_hash is distinct from excluded.content_hash
+                then excluded.processing_status else source_documents.processing_status end,
+            processing_attempts=case when source_documents.content_hash is distinct from excluded.content_hash
+                then 0 else source_documents.processing_attempts end,
+            next_attempt_at=case when source_documents.content_hash is distinct from excluded.content_hash
+                then now() else source_documents.next_attempt_at end
+            returning id""", (source, alias, source_key(row), cnj or None,
+            row.get("data_disponibilizacao") or row.get("dataDisponibilizacao"),
+            row.get("tipoComunicacao") or row.get("title"), text,
+            row.get("link") or row.get("document_url"), Jsonb(row), digest, status)).fetchone()
+        return record["id"]
+
+
+def claim_document() -> dict | None:
+    with connect() as conn:
+        return conn.execute("""with candidate as (
+            select id from public.source_documents where
+            ((processing_status in ('pending','retry') and next_attempt_at<=now()) or
+             (processing_status='processing' and processing_started_at<now()-interval '30 minutes'))
+            and processing_attempts<%s
+            order by (text_excerpt ~ 'R\\$') desc,published_at desc nulls last,first_seen_at
+            for update skip locked limit 1)
+            update public.source_documents d set processing_status='processing',processing_started_at=now(),
+            processing_attempts=processing_attempts+1 from candidate where d.id=candidate.id returning d.*""",
+            (settings.max_processing_attempts,)).fetchone()
+
+
+def finish_document(doc: dict, status: str, result: dict | None = None, error: str | None = None):
+    attempts = doc["processing_attempts"]
+    if status == "retry" and attempts >= settings.max_processing_attempts:
+        status = "failed"
+    next_try = datetime.now(timezone.utc) + timedelta(minutes=min(360, 5 * 2 ** max(0, attempts - 1)))
+    with connect() as conn:
+        conn.execute("""update public.source_documents set processing_status=%s,processed_at=now(),
+            last_error=%s,classification=%s,next_attempt_at=%s where id=%s""",
+            (status, error, Jsonb(result) if result is not None else None, next_try, doc["id"]))
+
+
+def queue_counts() -> dict:
+    with connect() as conn:
+        rows = conn.execute("select processing_status,count(*) as n from public.source_documents group by processing_status").fetchall()
+        return {r["processing_status"]: r["n"] for r in rows}
+
+
+def save_opportunity(doc: dict, result: dict) -> tuple[str, bool]:
+    alias = canonical_alias(doc["tribunal_alias"])
+    cnj = canonical_cnj(doc["process_number"] or "") or "documento-" + str(doc["id"])
+    rtype = result["requisition_type"]
+    with connect() as conn:
+        old = conn.execute("""select o.* from public.opportunities o join public.processes p on p.id=o.process_id
+            join public.tribunals t on t.id=p.tribunal_id where t.alias=any(%s)
+            and (p.cnj_number=any(%s) or regexp_replace(p.cnj_number,'[^0-9]','','g')=%s)
+            and o.requisition_type is not distinct from %s limit 1""",
+            ([alias, alias.removeprefix("api_publica_")], [cnj, str(doc["process_number"] or "")], cnj, rtype)).fetchone()
+        if old:
+            if old["alerted_at"] is None and (old["amount"] is None or float(old["amount"]) < settings.min_opportunity_amount or result["potential_score"] >= float(old["potential_score"] or 0)):
+                evidence = conn.execute("""insert into public.evidence(process_id,evidence_type,text_excerpt,document_url,sha256,source_payload)
+                    values(%s,%s,%s,%s,%s,%s) returning id""", (old["process_id"], rtype, result["evidence_quote"], doc["document_url"], doc["content_hash"], Jsonb(doc.get("raw_data") or {}))).fetchone()["id"]
+                conn.execute("""update public.opportunities set evidence_id=%s,amount=%s,potential_score=%s,classification=%s,
+                    beneficiary=%s,debtor_entity=%s,lawyer=%s,status=%s where id=%s""", (evidence, result["amount"], result["potential_score"], Jsonb(result), result.get("beneficiary"), result.get("debtor_entity"), result.get("lawyer"), "new" if result["potential_score"] >= settings.min_confidence else "review", old["id"]))
+            return old["id"], False
+        conn.execute("insert into public.tribunals(alias,name) values(%s,%s) on conflict(alias) do nothing", (alias, alias.upper()))
+        tribunal = conn.execute("select id from public.tribunals where alias=%s", (alias,)).fetchone()["id"]
+        source = doc.get("raw_data") or {}
+        process = conn.execute("""insert into public.processes(tribunal_id,cnj_number,source_url,raw_data)
+            values(%s,%s,%s,%s) on conflict(tribunal_id,cnj_number) do update
+            set source_url=coalesce(excluded.source_url,processes.source_url),raw_data=excluded.raw_data,updated_at=now()
+            returning id""", (tribunal, cnj, doc["document_url"], Jsonb(source))).fetchone()["id"]
+        evidence = conn.execute("""insert into public.evidence(process_id,evidence_type,text_excerpt,document_url,sha256,source_payload)
+            values(%s,%s,%s,%s,%s,%s) returning id""",
+            (process, rtype, result["evidence_quote"], doc["document_url"], doc["content_hash"], Jsonb(source))).fetchone()["id"]
+        opp = conn.execute("""insert into public.opportunities(process_id,evidence_id,status,requisition_type,amount,
+            beneficiary,debtor_entity,lawyer,potential_score,classification)
+            values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id""",
+            (process, evidence, "new" if result["potential_score"] >= settings.min_confidence else "review", rtype,
+            result["amount"], result.get("beneficiary"), result.get("debtor_entity"), result.get("lawyer"),
+            result["potential_score"], Jsonb(result))).fetchone()["id"]
+        return opp, True
+
+
+def pending_alerts(limit: int = 120) -> list[dict]:
+    with connect() as conn:
+        return conn.execute("""select o.*,p.cnj_number,p.source_url,t.alias,e.text_excerpt,e.document_url
+            from public.opportunities o join public.processes p on p.id=o.process_id
+            join public.tribunals t on t.id=p.tribunal_id left join public.evidence e on e.id=o.evidence_id
+            where o.alerted_at is null and o.potential_score>=%s and o.amount>=%s
+            and o.status='new' order by o.created_at limit %s""",
+            (settings.min_confidence, settings.min_opportunity_amount, limit)).fetchall()
+
+
+def mark_alerted(opp_id):
+    with connect() as conn:
+        conn.execute("update public.opportunities set alerted_at=now() where id=%s", (opp_id,))
+
+
+def get_state(key: str) -> dict:
+    with connect() as conn:
+        row = conn.execute("select value from public.bot_state where key=%s", (key,)).fetchone()
+        return row["value"] if row else {}
+
+
+def set_state(key: str, value: dict):
+    with connect() as conn:
+        conn.execute("""insert into public.bot_state(key,value) values(%s,%s)
+            on conflict(key) do update set value=excluded.value,updated_at=now()""", (key, Jsonb(value)))
+
+
+def start_run() -> str:
+    with connect() as conn:
+        return conn.execute("insert into public.collection_runs(mode,sources) values(%s,%s) returning id",
+            ("scheduled", Jsonb(["djen", "datajud"]))).fetchone()["id"]
+
+
+def finish_run(run_id, outcome: str, metrics: dict, errors: list[str]):
+    with connect() as conn:
+        conn.execute("""update public.collection_runs set finished_at=now(),outcome=%s,
+            tribunals_count=%s,candidates_count=%s,errors=%s,metrics=%s where id=%s""",
+            (outcome, metrics.get("tribunals", 0), metrics.get("classified", 0), Jsonb(errors), Jsonb(metrics), run_id))
+        conn.execute("insert into public.audit_log(action,metadata) values(%s,%s)",
+            ("collection_completed", Jsonb({"outcome": outcome, **metrics, "errors": errors})))
