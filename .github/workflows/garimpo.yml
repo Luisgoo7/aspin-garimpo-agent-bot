@@ -2,14 +2,13 @@ name: Garimpo ASPIN
 
 on:
   schedule:
-    # GitHub usa UTC; 05 minutos depois de cada hora reduz colisões no início do horário.
     - cron: '5 * * * *'
   workflow_dispatch:
     inputs:
       lookback_minutes:
-        description: 'Janela de coleta em minutos'
+        description: 'Janela em minutos; vazio usa cursor persistente e recuperação inicial'
         required: false
-        default: '60'
+        default: ''
         type: string
 
 concurrency:
@@ -18,18 +17,15 @@ concurrency:
 
 jobs:
   collect:
-    name: Coletar e classificar oportunidades
+    name: Validar, coletar e classificar
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     permissions:
       contents: read
-
     env:
       APP_ENV: production
       LOG_LEVEL: INFO
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -37,42 +33,78 @@ jobs:
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       DATAJUD_API_KEY: ${{ secrets.DATAJUD_API_KEY }}
       DATAJUD_TRIBUNALS: ${{ vars.DATAJUD_TRIBUNALS || 'api_publica_trf1' }}
-      POLL_INTERVAL_MINUTES: '60'
-      STATUS_INTERVAL_MINUTES: '120'
       MIN_CONFIDENCE: '0.78'
       MIN_OPPORTUNITY_AMOUNT: '100000'
       ASPIN_COMMISSION_RATE: '0.05'
-      DATAJUD_PAGE_SIZE: '50'
-      MAX_CLASSIFY_PER_CYCLE: '120'
+      POLL_INTERVAL_MINUTES: '60'
+      STATUS_INTERVAL_MINUTES: '120'
       INITIAL_LOOKBACK_DAYS: '7'
-      INCREMENTAL_LOOKBACK_MINUTES: '60'
-
+      INCREMENTAL_LOOKBACK_MINUTES: '120'
+      MAX_CLASSIFY_PER_CYCLE: '120'
+      DJEN_PAGE_SIZE: '50'
+      DJEN_MAX_PAGES: '10'
+      DJEN_MAX_DOCUMENTS: '2500'
+      DJEN_MAX_REQUESTS: '80'
     steps:
       - name: Baixar código
         uses: actions/checkout@v4
-
       - name: Preparar Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
-
       - name: Instalar dependências
-        run: python -m pip install -r requirements.txt
-
-      - name: Validar sintaxe
-        run: python -m py_compile app/*.py
-
-      - name: Executar um ciclo
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Testes de regressão
+        run: python -m pytest tests -q
         env:
-          LOOKBACK_MINUTES: ${{ inputs.lookback_minutes || '60' }}
+          DATABASE_URL: ''
+          TELEGRAM_BOT_TOKEN: ''
+          TELEGRAM_CHAT_ID: ''
+          GROQ_API_KEY: ''
+          GEMINI_API_KEY: ''
+          NVIDIA_API_KEY: ''
+          DATAJUD_API_KEY: ''
+      - name: Importar configuração protegida
+        env:
+          ASPIN_CONFIG_BUNDLE: ${{ secrets.ASPIN_ENV || secrets.ACCS }}
         run: |
           python - <<'PY'
-          import asyncio
-          import os
-          from app.worker import poll_once
-
-          lookback = int(os.environ.get("LOOKBACK_MINUTES", "60"))
-          found = asyncio.run(poll_once(lookback))
-          print(f"Ciclo do GitHub Actions concluído: oportunidades={found}")
+          import io, json, os, uuid
+          from dotenv import dotenv_values
+          raw = os.environ.get('ASPIN_CONFIG_BUNDLE', '').strip()
+          allowed = {'DATABASE_URL','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','GROQ_API_KEY','GEMINI_API_KEY','NVIDIA_API_KEY','DATAJUD_API_KEY','SUPABASE_URL','SUPABASE_SERVICE_ROLE_KEY'}
+          if raw.startswith('```'):
+              raw = '\n'.join(raw.splitlines()[1:-1])
+          try:
+              data = json.loads(raw) if raw.startswith('{') else dict(dotenv_values(stream=io.StringIO(raw), interpolate=False))
+          except (ValueError, TypeError):
+              raise SystemExit('O secret de configuração não tem formato .env ou JSON válido')
+          if not isinstance(data, dict):
+              raise SystemExit('O secret de configuração precisa ser objeto JSON ou arquivo .env')
+          imported = []
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as out:
+              for key in sorted(allowed):
+                  if os.environ.get(key, '').strip() or data.get(key) in (None, ''):
+                      continue
+                  value = str(data[key])
+                  if '\x00' in value:
+                      raise SystemExit('Configuração contém caractere inválido')
+                  escaped = value.replace('%','%25').replace('\r','%0D').replace('\n','%0A')
+                  print('::add-mask::' + escaped)
+                  delimiter = 'ASPIN_' + uuid.uuid4().hex
+                  out.write(f'{key}<<{delimiter}\n{value}\n{delimiter}\n')
+                  imported.append(key)
+          print('Configurações importadas (somente nomes): ' + ', '.join(imported))
           PY
+      - name: Verificar configurações obrigatórias
+        run: python -m app.worker --check-config
+      - name: Executar ciclo auditável
+        env:
+          LOOKBACK_MINUTES: ${{ inputs.lookback_minutes }}
+        run: |
+          if [ -n "$LOOKBACK_MINUTES" ]; then
+            python -m app.worker --once --lookback-minutes "$LOOKBACK_MINUTES"
+          else
+            python -m app.worker --once
+          fi
