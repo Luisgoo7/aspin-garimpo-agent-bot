@@ -16,8 +16,7 @@ async def recover_queries(batch, metrics: dict, errors: list[str], now: datetime
     if due:
         cursor=due['cursor']
         result=await search_djen(datetime.fromisoformat(cursor['since']).date(),datetime.fromisoformat(cursor['until']).date(),cursor=cursor,stop_after_query=True)
-        for row in result.rows:
-            storage.upsert_document(row)
+        storage.upsert_documents(result.rows)
         metrics['djen_documents']+=len(result.rows)
         metrics['djen_pages']+=result.pages
         errors.extend(result.errors)

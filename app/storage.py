@@ -164,7 +164,21 @@ def source_key(row: dict) -> str:
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 
-def upsert_document(row: dict) -> str:
+UPSERT_DOCUMENT_SQL = """insert into public.source_documents
+    (source,tribunal_alias,external_id,process_number,published_at,title,text_excerpt,document_url,raw_data,content_hash,processing_status,prefilter_amount)
+    values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    on conflict(source,external_id) do update set
+    text_excerpt=excluded.text_excerpt,document_url=excluded.document_url,raw_data=excluded.raw_data,
+    content_hash=excluded.content_hash,updated_at=now(),prefilter_amount=excluded.prefilter_amount,
+    processing_status=case when source_documents.content_hash is distinct from excluded.content_hash
+        then excluded.processing_status else source_documents.processing_status end,
+    processing_attempts=case when source_documents.content_hash is distinct from excluded.content_hash
+        then 0 else source_documents.processing_attempts end,
+    next_attempt_at=case when source_documents.content_hash is distinct from excluded.content_hash
+        then now() else source_documents.next_attempt_at end"""
+
+
+def _document_params(row: dict) -> tuple:
     source = row.get("source") or "djen"
     text = clean_text(row.get("texto") or row.get("text_excerpt") or "")
     digest = hashlib.sha256(text.encode()).hexdigest()
@@ -172,24 +186,34 @@ def upsert_document(row: dict) -> str:
     cnj = canonical_cnj(row.get("numero_processo") or row.get("numeroProcesso") or "")
     amount = max_amount_in_text(text)
     status = initial_status(source, text, amount)
-    with connect() as conn:
-        record = conn.execute("""insert into public.source_documents
-            (source,tribunal_alias,external_id,process_number,published_at,title,text_excerpt,document_url,raw_data,content_hash,processing_status,prefilter_amount)
-            values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            on conflict(source,external_id) do update set
-            text_excerpt=excluded.text_excerpt,document_url=excluded.document_url,raw_data=excluded.raw_data,
-            content_hash=excluded.content_hash,updated_at=now(),prefilter_amount=excluded.prefilter_amount,
-            processing_status=case when source_documents.content_hash is distinct from excluded.content_hash
-                then excluded.processing_status else source_documents.processing_status end,
-            processing_attempts=case when source_documents.content_hash is distinct from excluded.content_hash
-                then 0 else source_documents.processing_attempts end,
-            next_attempt_at=case when source_documents.content_hash is distinct from excluded.content_hash
-                then now() else source_documents.next_attempt_at end
-            returning id""", (source, alias, source_key(row), cnj or None,
+    return (source, alias, source_key(row), cnj or None,
             row.get("data_disponibilizacao") or row.get("dataDisponibilizacao"),
             row.get("tipoComunicacao") or row.get("title"), text,
-            row.get("link") or row.get("document_url"), Jsonb(row), digest, status, amount)).fetchone()
-        return record["id"]
+            row.get("link") or row.get("document_url"), Jsonb(row), digest, status, amount)
+
+
+def upsert_document(row: dict) -> str:
+    with connect() as conn:
+        return conn.execute(UPSERT_DOCUMENT_SQL + " returning id", _document_params(row)).fetchone()["id"]
+
+
+def upsert_documents(rows: list[dict], batch_size: int = 500) -> int:
+    """Grava muitas publicações numa única conexão, em lotes (pipeline do psycopg).
+
+    Uma conexão por publicação levava minutos com milhares de linhas e travava o
+    prazo do ciclo; em lote são segundos.
+    """
+    if not rows:
+        return 0
+    total = 0
+    with connect() as conn:
+        with conn.cursor() as cur:
+            for start in range(0, len(rows), batch_size):
+                chunk = [_document_params(r) for r in rows[start:start + batch_size]]
+                cur.executemany(UPSERT_DOCUMENT_SQL, chunk)
+                conn.commit()
+                total += len(chunk)
+    return total
 
 
 def initial_status(source: str, text: str, amount: float | None) -> str:
