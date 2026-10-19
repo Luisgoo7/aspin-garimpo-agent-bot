@@ -30,6 +30,8 @@ concurrency:
 jobs:
   tests:
     name: Testes (inclui PostgreSQL isolado)
+    # Testes rodam nas execuções manuais/mudanças; os agendamentos de hora em hora economizam minutos.
+    if: ${{ github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -60,6 +62,7 @@ jobs:
   collect:
     name: Validar, coletar e classificar
     needs: tests
+    if: ${{ !cancelled() && (needs.tests.result == 'success' || needs.tests.result == 'skipped') }}
     # A API do DJEN recusa IPs fora do Brasil. Com um runner próprio no Brasil
     # (VM/PC), defina as variáveis RUNNER=self-hosted e ENABLE_DJEN=true.
     runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
