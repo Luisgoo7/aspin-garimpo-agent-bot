@@ -596,6 +596,57 @@ async def run_forever():
         await asyncio.sleep(max(0, delay))
 
 
+EXAMPLE_OPPORTUNITY = {
+    "id": "exemplo", "amount": 338813.79, "potential_score": 0.92, "alias": "api_publica_trf1",
+    "requisition_type": "precatorio", "cnj_number": "0000000-00.2024.4.01.3400",
+    "beneficiary": "CREDOR FICTÍCIO", "debtor_entity": "União Federal",
+    "document_url": "(exemplo — sem link)",
+    "text_excerpt": "Requisito o pagamento em favor do(s) credor(es) ... Valor Total do Beneficiário: R$ 338.813,79",
+    "classification": {
+        "amount_basis": "principal", "process_class": "CUMPRIMENTO DE SENTENÇA CONTRA A FAZENDA PÚBLICA",
+        "court_body": "14ª Vara Federal Cível da SJDF", "reference_process": "0000000-00.2014.4.01.3400",
+        "subject": "Descontos indevidos", "requisition_number": "2025.0000.000.000000",
+        "credit_nature": "alimentar", "legal_preference": "Idosos a partir de 60 anos",
+        "contractual_fees_amount": 84703.44, "res_judicata_date": "25/04/2024", "third_party_interest": False,
+        "reason": "Requisição de pagamento expedida com valor do beneficiário, natureza alimentar e preferência de idoso.",
+    },
+}
+
+
+async def send_preview() -> int:
+    """Prévia da entrega das 12h no canal: as 3 melhores atuais, sem marcar como enviadas.
+
+    Se ainda não houver 3 oportunidades qualificadas, completa com um exemplo
+    claramente marcado como fictício.
+    """
+    tz = ZoneInfo(settings.digest_timezone)
+    slot = datetime.now(tz).replace(hour=12, minute=0, second=0, microsecond=0)
+    try:
+        pool = storage.pending_alerts(settings.digest_pool_size)
+        for opp in pool:
+            opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+        best = sorted(pool, key=rank_score, reverse=True)[:settings.digest_top_n]
+    except Exception as exc:
+        log.warning("Prévia sem dados do banco: %s", storage.safe_error(exc))
+        best = []
+    real = len(best)
+    await send_alert(
+        "ASPIN | PRÉVIA da entrega das 12h — não conta como entrega\n\n"
+        f"Assim chegam as {settings.digest_top_n} melhores oportunidades às 08h, 12h e 18h. "
+        f"Oportunidades reais qualificadas agora: {real}."
+        + ("" if real >= settings.digest_top_n else
+           f" As demais desta prévia são EXEMPLO FICTÍCIO baseado no ofício modelo."))
+    total = settings.digest_top_n
+    for index in range(1, total + 1):
+        if index <= real:
+            text = "[PRÉVIA] " + format_alert(best[index - 1], index, total, slot)
+        else:
+            text = "[EXEMPLO FICTÍCIO — dados inventados] " + format_alert(dict(EXAMPLE_OPPORTUNITY), index, total, slot)
+        await send_alert(text[:4000])
+    print(f"Prévia enviada: {real} reais + {total - min(real, total)} exemplo(s)")
+    return EXIT_OK
+
+
 def write_summary(result: dict | None, failure: str | None = None):
     """Resumo sanitizado no painel do GitHub Actions (somente métricas e erros sem segredos)."""
     path = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -635,11 +686,15 @@ def main():
     parser.add_argument("--check-db", action="store_true", help="testa a conexão PostgreSQL e mostra a causa sanitizada")
     parser.add_argument("--lookback-minutes", type=int)
     parser.add_argument("--simulate-failure", choices=SIMULATIONS, help="falha deliberada para validar o caminho de erro")
+    parser.add_argument("--send-preview", action="store_true", help="envia ao canal uma prévia da entrega das 12h")
     args = parser.parse_args()
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     if args.simulate_failure:
         settings.simulate_failure = args.simulate_failure
     try:
+        if args.send_preview:
+            require_configuration()
+            return asyncio.run(send_preview())
         if args.check_db:
             if not settings.database_url.strip():
                 raise CycleFailure("Configuração incompleta: DATABASE_URL")

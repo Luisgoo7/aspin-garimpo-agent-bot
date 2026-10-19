@@ -635,3 +635,18 @@ def test_focus_excerpt_keeps_the_largest_amount_inside_the_window():
 
 def test_json_metrics_tolerate_datetimes():
     assert '"2026-10-19 12:00:00"' in storage._dumps({"slot": datetime(2026, 10, 19, 12)})
+
+
+@pytest.mark.asyncio
+async def test_preview_fills_with_fictitious_example_and_marks_nothing(monkeypatch):
+    marked = []
+    monkeypatch.setattr(storage, "pending_alerts", lambda limit: [oficio_opp()])
+    monkeypatch.setattr(storage, "datajud_signal", lambda cnj: None)
+    monkeypatch.setattr(storage, "mark_alerted", marked.append)
+    sender = AsyncMock()
+    monkeypatch.setattr(worker, "send_alert", sender)
+    assert await worker.send_preview() == 0
+    texts = [c.args[0] for c in sender.await_args_list]
+    assert len(texts) == 4 and "PRÉVIA" in texts[0]
+    assert texts[1].startswith("[PRÉVIA] ASPIN | Oportunidade 1 de 3 — entrega das 12h")
+    assert all("EXEMPLO FICTÍCIO" in t for t in texts[2:]) and not marked

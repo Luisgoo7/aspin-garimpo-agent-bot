@@ -11,6 +11,11 @@ on:
         required: false
         default: ''
         type: string
+      send_preview:
+        description: 'Só enviar ao Telegram uma PRÉVIA da entrega das 12h (não coleta, não conta como entrega)'
+        required: false
+        default: false
+        type: boolean
       simulate_failure:
         description: 'Falha deliberada para validar o caminho de erro (o run deve ficar vermelho e registrar o erro)'
         required: false
@@ -141,7 +146,11 @@ jobs:
       - name: Testar conexão com o banco (causa sanitizada)
         if: ${{ inputs.simulate_failure != 'db' }}
         run: python -m app.worker --check-db
+      - name: Enviar prévia da entrega
+        if: ${{ inputs.send_preview }}
+        run: python -m app.worker --send-preview
       - name: Executar ciclo auditável
+        if: ${{ !inputs.send_preview }}
         env:
           LOOKBACK_MINUTES: ${{ inputs.lookback_minutes }}
         run: |
