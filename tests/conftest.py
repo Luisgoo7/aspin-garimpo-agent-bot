@@ -27,3 +27,9 @@ def _no_db_for_message_ids(monkeypatch):
     from app import storage
     if not os.environ.get("ASPIN_TEST_DATABASE_URL"):
         monkeypatch.setattr(storage, "set_telegram_message", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_format_throttle():
+    from app import worker
+    worker.LAST_FORMAT_TRY[0] = float("-inf")
