@@ -232,10 +232,10 @@ async def test_datajud_429_backs_off_then_succeeds(monkeypatch):
 @pytest.mark.asyncio
 async def test_datajud_429_does_not_loop_forever(monkeypatch):
     monkeypatch.setattr(datajud.asyncio, "sleep", AsyncMock())
-    http = FakeHttp([FakeResponse(429)] * 3)
-    with pytest.raises(datajud.DataJudError, match="HTTP 429 após 3 tentativas"):
+    http = FakeHttp([FakeResponse(429)] * 2)
+    with pytest.raises(datajud.DataJudError, match="HTTP 429 após 2 tentativas"):
         await datajud.DataJudClient("k").search("api_publica_tjsp", {}, http)
-    assert http.calls == 3
+    assert http.calls == 2
 
 
 @pytest.mark.asyncio
@@ -249,14 +249,14 @@ async def test_datajud_failure_does_not_advance_cursor(monkeypatch):
 
     async def collect(alias, cursor):
         if alias == "api_publica_trf3":
-            raise datajud.DataJudError("HTTP 503 após 3 tentativas")
+            raise datajud.DataJudError("HTTP 503 após 2 tentativas")
         return [{"source": "datajud"}], {"since": "s", "after": [1, "x"]}, {"documents": 1, "pages": 1, "exhausted": True}
     monkeypatch.setattr(worker, "collect_expeditions", collect)
     metrics = {"tribunals": 0, "datajud_documents": 0, "datajud_pages": 0, "datajud_ok": 0, "datajud_failed": []}
     errors = []
     await worker._collect_datajud(metrics, errors)
-    assert list(saved) == ["datajud_cursor:api_publica_tjsp"]
-    assert metrics["datajud_failed"] == ["api_publica_trf3"] and errors == ["datajud api_publica_trf3: HTTP 503 após 3 tentativas"]
+    assert [k for k in saved if k.startswith("datajud_cursor")] == ["datajud_cursor:api_publica_tjsp"]
+    assert metrics["datajud_failed"] == ["api_publica_trf3"] and errors == ["datajud api_publica_trf3: HTTP 503 após 2 tentativas"]
 
 
 # ---------- DJEN ----------
@@ -520,3 +520,51 @@ async def test_status_goes_to_channel_only_on_failure(monkeypatch):
     assert sender.await_count == 0
     await worker.maybe_send_status({"outcome": "source_failed", "queue": {}}, ["djen_http_403"])
     assert sender.await_count == 1
+
+
+
+@pytest.mark.asyncio
+async def test_old_queue_items_without_amount_skip_ai_and_do_not_count(monkeypatch):
+    docs = iter([{"id": f"d{i}", "processing_attempts": 1, "source": "djen", "raw_data": {},
+                  "text_excerpt": "Expeça-se ofício requisitório."} for i in range(30)]
+                + [{"id": "rico", "processing_attempts": 1, "source": "djen", "raw_data": {},
+                    "text_excerpt": "Expeça-se ofício requisitório de R$ 300.000,00"}, None])
+    finished = []
+    monkeypatch.setattr(storage, "claim_document", lambda: next(docs))
+    monkeypatch.setattr(storage, "finish_document", lambda d, status, *a, **k: finished.append((d["id"], status)))
+    monkeypatch.setattr(storage, "save_opportunity", lambda d, r: ("o", True))
+    monkeypatch.setattr(settings, "max_classify_per_cycle", 1)
+    classify = AsyncMock(return_value={"is_opportunity": True, "amount": 300000, "potential_score": 0.9,
+                                       "requisition_type": "oficio_requisitorio", "evidence_quote": "R$ 300.000,00"})
+    monkeypatch.setattr(worker.LLMClassifier, "classify", classify)
+    metrics = {"classified": 0, "opportunities": 0, "below_minimum": 0}
+    await worker._process_queue(metrics, [])
+    assert classify.await_count == 1 and metrics["prefiltered"] == 30
+    assert ("rico", "classified") in finished
+
+
+@pytest.mark.asyncio
+async def test_datajud_time_budget_rotates_tribunals(monkeypatch):
+    state = {}
+    monkeypatch.setattr(settings, "datajud_tribunals", "api_publica_tjsp,api_publica_trf3,api_publica_trf1")
+    monkeypatch.setattr(settings, "enable_datajud", True)
+    monkeypatch.setattr(settings, "datajud_time_budget_seconds", 30)
+    monkeypatch.setattr(storage, "get_state", lambda key: state.get(key, {}))
+    monkeypatch.setattr(storage, "set_state", lambda key, value: state.__setitem__(key, value))
+    monkeypatch.setattr(storage, "upsert_document", lambda row: "id")
+    clock = SimpleNamespace(t=0.0)
+    monkeypatch.setattr(worker, "time", SimpleNamespace(monotonic=lambda: clock.t))
+    seen = []
+
+    async def collect(alias, cursor):
+        seen.append(alias)
+        clock.t += 100  # cada tribunal estoura o orçamento de 30s
+        return [], {"since": "s"}, {"documents": 0, "pages": 1, "exhausted": True}
+    monkeypatch.setattr(worker, "collect_expeditions", collect)
+    metrics = {"tribunals": 0, "datajud_documents": 0, "datajud_pages": 0, "datajud_ok": 0, "datajud_failed": []}
+    await worker._collect_datajud(metrics, [])
+    assert seen == ["api_publica_tjsp"] and metrics["datajud_not_reached"] == ["api_publica_trf3", "api_publica_trf1"]
+    assert worker.decide_outcome(dict(metrics, djen_pages=1, ai_ok=0, ai_failed=0, alerts=0, alerts_failed=0), []) == "partial"
+    seen.clear()
+    await worker._collect_datajud({"tribunals": 0, "datajud_documents": 0, "datajud_pages": 0, "datajud_ok": 0, "datajud_failed": []}, [])
+    assert seen == ["api_publica_trf3"]

@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     datajud_api_key: str = ""
     datajud_tribunals: str = DEFAULT_DATAJUD_TRIBUNALS
     datajud_max_pages: int = Field(default=5, ge=1, le=100)
+    datajud_time_budget_seconds: int = Field(default=300, ge=30, le=3600)
+    datajud_timeout_seconds: float = Field(default=60, ge=5, le=300)
+    max_claims_per_cycle: int = Field(default=2000, ge=1, le=100000)
     datajud_initial_lookback_days: int = Field(default=30, ge=1, le=120)
     datajud_max_expedition_age_days: int = Field(default=180, ge=7, le=3650)
     djen_tribunals: str = ""

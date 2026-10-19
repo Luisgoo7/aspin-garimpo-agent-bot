@@ -19,7 +19,7 @@ class DataJudError(RuntimeError):
 
 
 class DataJudClient:
-    def __init__(self, api_key: str | None = None, max_retries: int = 3):
+    def __init__(self, api_key: str | None = None, max_retries: int = 2):
         self.api_key = api_key or settings.datajud_api_key
         self.max_retries = max_retries
 
@@ -140,7 +140,7 @@ async def collect_expeditions(alias: str, cursor: dict, client: DataJudClient | 
     exhausted = False
     old = 0
     cutoff = expedition_cutoff()
-    async with httpx.AsyncClient(timeout=120) as http:
+    async with httpx.AsyncClient(timeout=settings.datajud_timeout_seconds) as http:
         while pages < settings.datajud_max_pages:
             data = await client.search(alias, build_expedition_query(after, since, settings.datajud_page_size), http)
             hits_data = data.get("hits") or {}

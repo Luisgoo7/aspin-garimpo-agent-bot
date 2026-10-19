@@ -57,7 +57,7 @@ def test_alert_does_not_mislabel_gross_as_net():
 
 @pytest.mark.asyncio
 async def test_ai_failure_keeps_document_for_retry(monkeypatch):
-    doc = {"id": "doc", "processing_attempts": 1, "text_excerpt": "RPV expedida", "raw_data": {}}
+    doc = {"id": "doc", "processing_attempts": 1, "text_excerpt": "RPV expedida no valor de R$ 200.000,00", "raw_data": {}}
     queue = iter([doc, None])
     finished = []
     monkeypatch.setattr(storage, "claim_document", lambda: next(queue))

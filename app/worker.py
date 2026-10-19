@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from .config import settings
 from .datajud import DataJudError, collect_expeditions
 from .llm import LLMClassifier, _AMOUNT_CONTEXT_RE, _normalize_amount
-from .opportunity import KEYWORDS, canonical_alias, canonical_cnj, clean_text, parse_amount
+from .opportunity import KEYWORDS, max_amount_in_text, canonical_alias, canonical_cnj, clean_text, parse_amount
 from .sources import search_djen, probe_tjsp_pages
 from .telegram_bot import send_alert
 from .source_retry import recover_queries
@@ -174,7 +174,17 @@ async def _collect_datajud(metrics: dict, errors: list[str]):
         metrics["datajud_disabled"] = True
         return
     aliases = [canonical_alias(x) for x in settings.datajud_tribunals.split(",") if x.strip()]
+    # Rodízio: cada ciclo começa num tribunal diferente, para o orçamento de tempo
+    # não deixar sempre os últimos da lista sem consulta.
+    start = int(storage.get_state("datajud_rotation").get("next", 0)) % max(1, len(aliases))
+    aliases = aliases[start:] + aliases[:start]
+    storage.set_state("datajud_rotation", {"next": start + 1})
+    deadline = time.monotonic() + settings.datajud_time_budget_seconds
     for alias in aliases:
+        if time.monotonic() >= deadline:
+            metrics.setdefault("datajud_not_reached", []).append(alias)  # fica para o próximo ciclo
+            metrics["datajud_backlog"] = True
+            continue
         metrics["tribunals"] += 1
         key = "datajud_cursor:" + alias
         try:
@@ -199,7 +209,10 @@ async def _collect_datajud(metrics: dict, errors: list[str]):
 async def _process_queue(metrics: dict, errors: list[str]):
     classifier = LLMClassifier()
     deadline = time.monotonic() + settings.ai_time_budget_seconds
-    for _ in range(settings.max_classify_per_cycle):
+    ai_calls = 0
+    claims = 0
+    while ai_calls < settings.max_classify_per_cycle and claims < settings.max_claims_per_cycle:
+        claims += 1
         if time.monotonic() >= deadline:
             # Orçamento de tempo esgotado: o restante segue na fila para o próximo ciclo.
             metrics["ai_budget_exhausted"] = True
@@ -213,6 +226,16 @@ async def _process_queue(metrics: dict, errors: list[str]):
                 storage.finish_document(doc, "cancelled")
                 continue
             text = clean_text(doc.get("text_excerpt") or "")
+            # Pré-filtro também para itens antigos da fila (gravados antes dele existir):
+            # sem valor citado ou abaixo do mínimo não gasta IA nem conta nas 25 do ciclo.
+            amount_hint = max_amount_in_text(text)
+            triage = storage.initial_status(doc.get("source") or "djen", text, amount_hint)
+            if triage != "pending":
+                storage.finish_document(doc, triage, {"rule": "pre_filtro_local", "max_amount": amount_hint})
+                metrics["prefiltered"] = metrics.get("prefiltered", 0) + 1
+                if triage == "below_minimum":
+                    metrics["below_minimum"] += 1
+                continue
             amounts = [_normalize_amount(match.group(1)) for match in _AMOUNT_CONTEXT_RE.finditer(text)]
             amounts = [amount for amount in amounts if amount is not None and amount >= 0]
             if amounts and max(amounts) < settings.min_opportunity_amount:
@@ -224,6 +247,7 @@ async def _process_queue(metrics: dict, errors: list[str]):
                 result = {"error": True, "reason": "falha simulada da IA"}
             else:
                 result = await classifier.classify(text[:18000])
+            ai_calls += 1
             metrics["classified"] += 1
             if result.get("error"):
                 metrics["ai_failed"] = metrics.get("ai_failed", 0) + 1

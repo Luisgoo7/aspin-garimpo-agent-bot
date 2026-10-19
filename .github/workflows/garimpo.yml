@@ -92,7 +92,8 @@ jobs:
       DJEN_MAX_REQUESTS: '150'
       DATAJUD_PAGE_SIZE: '100'
       DATAJUD_MAX_PAGES: '2'
-      AI_TIME_BUDGET_SECONDS: '600'
+      AI_TIME_BUDGET_SECONDS: '900'
+      DATAJUD_TIME_BUDGET_SECONDS: '300'
     steps:
       - name: Baixar código
         uses: actions/checkout@v4
