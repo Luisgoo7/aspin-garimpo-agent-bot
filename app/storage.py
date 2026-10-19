@@ -1,5 +1,6 @@
 import hashlib
 import os
+import uuid
 import json
 import time
 from contextlib import contextmanager
@@ -65,9 +66,14 @@ def check_connection() -> str:
     with connect() as conn:
         version = conn.execute("show server_version").fetchone()["server_version"]
         holder = lock_holder(conn)
+        runs = conn.execute("""select mode,outcome,started_at,finished_at from public.collection_runs
+            order by started_at desc limit 3""").fetchall() if _table_exists(conn, "collection_runs") else []
     text = format_diagnosis(diagnose(effective_dsn())) + f" | conexão=ok, postgres={version.split()[0]}"
     if holder:
-        text += f" | lock do coletor ocupado por outra sessão: {holder}"
+        text += f" | advisory lock antigo (não usado mais) preso em: {holder}"
+    if runs:
+        text += " | últimos ciclos: " + "; ".join(
+            f"{r['started_at']:%Y-%m-%d %H:%M}Z {r['mode']} {r['outcome']}{'' if r['finished_at'] else ' (sem finished_at)'}" for r in runs)
     if DSN_REPAIRED[0]:
         text += (" | AVISO: a região do pooler no secret está sem hífen (ex.: ca-central1); "
                  "o coletor corrigiu em memória, mas corrija o secret")
@@ -79,6 +85,10 @@ def ensure_schema():
     with connect() as conn:
         for name in MIGRATIONS:
             conn.execute((root / name).read_text(encoding="utf-8"))
+
+
+def _table_exists(conn, name: str) -> bool:
+    return conn.execute("select to_regclass(%s) is not null as ok", ("public." + name,)).fetchone()["ok"]
 
 
 def lock_holder(conn) -> str | None:
@@ -100,16 +110,33 @@ def lock_holder(conn) -> str | None:
 
 @contextmanager
 def collector_lock():
-    conn = connect()
-    conn.autocommit = True
+    """Lease com prazo numa tabela, em vez de advisory lock de sessão.
+
+    Advisory lock de sessão vaza atrás do pooler (Supavisor mantém a conexão do
+    servidor viva após um processo morrer), travando todos os ciclos seguintes.
+    O lease expira sozinho depois de CYCLE_TIMEOUT_SECONDS + 5 min.
+    """
+    holder = f"{APP_NAME}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    ttl = settings.cycle_timeout_seconds + 300
+    with connect() as conn:
+        row = conn.execute("""insert into public.collector_lease(name,holder,acquired_at,expires_at)
+            values('garimpo',%s,now(),now()+make_interval(secs=>%s))
+            on conflict(name) do update set holder=excluded.holder,acquired_at=excluded.acquired_at,expires_at=excluded.expires_at
+            where collector_lease.expires_at<now() returning holder""", (holder, ttl)).fetchone()
+    locked = bool(row and row["holder"] == holder)
     try:
-        locked = conn.execute("select pg_try_advisory_lock(%s) as locked", (LOCK_ID,)).fetchone()["locked"]
         yield locked
     finally:
-        try:
-            conn.execute("select pg_advisory_unlock(%s)", (LOCK_ID,))
-        finally:
-            conn.close()
+        if locked:
+            with connect() as conn:
+                conn.execute("update public.collector_lease set expires_at=now() where name='garimpo' and holder=%s", (holder,))
+
+
+def lease_holder() -> str | None:
+    with connect() as conn:
+        row = conn.execute("""select holder, extract(epoch from expires_at-now())::int as expira_em_s
+            from public.collector_lease where name='garimpo' and expires_at>now()""").fetchone()
+    return f"{row['holder'].split(':')[0]} (expira em {row['expira_em_s']}s)" if row else None
 
 
 def source_key(row: dict) -> str:

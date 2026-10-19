@@ -103,7 +103,7 @@ def test_db(monkeypatch):
     monkeypatch.setattr(settings, "database_url", url)
     storage.ensure_schema()
     with storage.connect() as conn:
-        conn.execute("truncate public.opportunities,public.evidence,public.processes,public.source_documents,public.collection_runs,public.audit_log,public.bot_state cascade")
+        conn.execute("truncate public.opportunities,public.evidence,public.processes,public.source_documents,public.collection_runs,public.audit_log,public.bot_state,public.collector_lease cascade")
     return url
 
 
@@ -167,6 +167,30 @@ def test_advisory_lock_prevents_two_collectors(test_db):
     with storage.collector_lock() as first:
         with storage.collector_lock() as second:
             assert first and not second
+    with storage.collector_lock() as third:
+        assert third  # liberado ao sair
+
+
+def test_expired_lease_from_crashed_collector_is_taken_over(test_db):
+    with storage.connect() as conn:
+        conn.execute("insert into public.collector_lease(name,holder,expires_at) values('garimpo','morto',now()-interval '1 minute')")
+    with storage.collector_lock() as locked:
+        assert locked
+
+
+def test_live_lease_blocks_second_collector(test_db):
+    with storage.connect() as conn:
+        conn.execute("insert into public.collector_lease(name,holder,expires_at) values('garimpo','aspin-garimpo-worker:1:x',now()+interval '10 minutes')")
+    with storage.collector_lock() as locked:
+        assert not locked
+    assert storage.lease_holder().startswith("aspin-garimpo-worker")
+
+
+def test_check_connection_reports_recent_runs(test_db):
+    run = storage.start_run(["djen"])
+    storage.finish_run(run, "success", {}, [])
+    text = storage.check_connection()
+    assert "conexão=ok" in text and "success" in text
 
 
 def test_metrics_are_persisted(test_db):

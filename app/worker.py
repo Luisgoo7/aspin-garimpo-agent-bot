@@ -276,13 +276,12 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
     require_configuration()
     if simulated("db"):
         raise storage.DatabaseUnavailable("Banco: causa=falha_simulada | como corrigir: remova SIMULATE_FAILURE")
+    storage.ensure_schema()  # idempotente; cria também a tabela do lease
     with storage.collector_lock() as locked:
         if not locked:
-            with storage.connect() as conn:
-                holder = storage.lock_holder(conn)
+            holder = storage.lease_holder()
             log.warning("Outro coletor já está executando; ciclo não duplicado (%s)", holder)
             return {"outcome": "skipped", "opportunities": 0, "errors": [], "lock_holder": holder}
-        storage.ensure_schema()
         now = datetime.now(timezone.utc)
         last = storage.get_state("last_collection")
         if lookback_minutes is None:
