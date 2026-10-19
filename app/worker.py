@@ -2,10 +2,14 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import time
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from .config import settings
-from .datajud import DataJudClient
+from .datajud import DataJudError, collect_expeditions
 from .llm import LLMClassifier, _AMOUNT_CONTEXT_RE, _normalize_amount
 from .opportunity import KEYWORDS, canonical_alias, canonical_cnj, clean_text, parse_amount
 from .sources import search_djen, probe_tjsp_pages
@@ -20,24 +24,62 @@ class CycleFailure(RuntimeError):
     pass
 
 
+# Códigos de saída: qualquer valor != 0 deixa o workflow vermelho.
+EXIT_OK = 0               # success ou partial (inclui "zero oportunidades" com busca concluída)
+EXIT_UNEXPECTED = 1       # exceção não prevista
+EXIT_CONFIG = 2           # configuração obrigatória ausente
+EXIT_SOURCE_FAILED = 3    # busca falhou: DJEN ou DataJud sem nenhuma resposta válida
+EXIT_DELIVERY_FAILED = 4  # IA sem nenhuma classificação ou Telegram sem entregar alertas
+EXIT_DATABASE = 5         # banco inacessível (causa sanitizada no log)
+
+OUTCOME_EXIT = {"success": EXIT_OK, "partial": EXIT_OK, "skipped": EXIT_OK,
+                "source_failed": EXIT_SOURCE_FAILED, "ai_failed": EXIT_DELIVERY_FAILED,
+                "alert_failed": EXIT_DELIVERY_FAILED}
+SIMULATIONS = ("djen", "datajud", "ia", "telegram", "db")
+
+
+def simulated(name: str) -> bool:
+    """Falha deliberada para validar o caminho de erro (SIMULATE_FAILURE / --simulate-failure)."""
+    return name in {x.strip().casefold() for x in str(settings.simulate_failure or "").split(",")}
+
+
+@contextmanager
+def timed(metrics: dict, stage: str):
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        metrics.setdefault("duration_s", {})[stage] = round(time.monotonic() - started, 1)
+
+
+def decide_outcome(metrics: dict, errors: list[str]) -> str:
+    """Separa "busca falhou" de "busca concluída sem oportunidades".
+
+    - source_failed: o DJEN não devolveu nenhuma página válida, ou todos os
+      tribunais DataJud falharam. Zero oportunidades aqui NÃO é resultado.
+    - ai_failed: havia documentos e nenhuma classificação da IA deu certo.
+    - alert_failed: havia alertas e nenhum foi entregue ao Telegram.
+    - partial: houve falhas isoladas (ficam na fila de retry) ou backlog.
+    - success: tudo concluído; opportunities=0 é um resultado válido.
+    """
+    djen_errors = [e for e in errors if e.startswith(("djen", "ciclo_djen"))]
+    if metrics.get("djen_pages", 0) == 0 and djen_errors:
+        return "source_failed"
+    if metrics.get("tribunals") and metrics.get("datajud_ok", 0) == 0 and metrics.get("datajud_failed"):
+        return "source_failed"
+    if metrics.get("ai_failed") and not metrics.get("ai_ok"):
+        return "ai_failed"
+    if metrics.get("alerts_failed") and not metrics.get("alerts"):
+        return "alert_failed"
+    if errors or metrics.get("limited") or metrics.get("datajud_backlog"):
+        return "partial"
+    return "success"
+
+
 def require_configuration():
     missing = settings.configuration_errors()
     if missing:
         raise CycleFailure("Configuração incompleta: " + ", ".join(missing))
-
-
-def build_query(since: datetime) -> dict:
-    return {
-        "size": settings.datajud_page_size,
-        "track_total_hits": True,
-        "_source": ["numeroProcesso", "movimentos", "classe", "assuntos", "dataHoraUltimaAtualizacao", "url"],
-        "sort": [{"dataHoraUltimaAtualizacao": {"order": "desc", "unmapped_type": "date"}}],
-        "query": {"bool": {
-            "filter": [{"range": {"movimentos.dataHora": {"gte": since.isoformat()}}}],
-            "should": [{"match_phrase": {"movimentos.nome": term}} for term in KEYWORDS],
-            "minimum_should_match": 1,
-        }},
-    }
 
 
 def brl(amount) -> str:
@@ -58,7 +100,8 @@ def format_alert(opp: dict) -> str:
         f"Beneficiário: {opp.get('beneficiary') or 'não informado'}\n"
         f"Devedor: {opp.get('debtor_entity') or 'não informado'}\n"
         f"Processo: {opp.get('cnj_number') or 'não informado'}\n"
-        f"Confiança da classificação: {float(opp['potential_score']):.0%}\n\n"
+        f"Confiança da classificação: {float(opp['potential_score']):.0%}\n"
+        f"{_datajud_line(opp)}\n\n"
         f"Motivo: {str(result.get('reason') or '')[:400]}\n\n"
         f"Evidência: {str(opp.get('text_excerpt') or '')[:700]}\n\n"
         f"Fonte: {str(url)[:600]}\n\n"
@@ -66,10 +109,22 @@ def format_alert(opp: dict) -> str:
     )[:4000]
 
 
+def _datajud_line(opp: dict) -> str:
+    signal = opp.get("datajud_signal")
+    if not signal:
+        return "DataJud: expedição de precatório/RPV ainda não indexada para este processo"
+    when = signal.get("published_at")
+    when = when.date().isoformat() if hasattr(when, "date") else str(when or "data não informada")[:10]
+    return f"DataJud: expedição de precatório/RPV registrada ({when})"
+
+
 def status_message(metrics: dict, errors: list[str]) -> str:
     queue = metrics.get("queue", {})
     pending = sum(queue.get(k, 0) for k in ("pending", "retry", "processing"))
-    if errors:
+    outcome = metrics.get("outcome")
+    if outcome in ("source_failed", "ai_failed", "alert_failed"):
+        title = f"ASPIN | FALHA ({outcome}) — não é confirmação de ausência de oportunidades"
+    elif errors:
         title = "ASPIN | Coleta com falhas — não é confirmação de ausência de oportunidades"
     elif metrics.get("limited") or pending:
         title = "ASPIN | Coleta parcial — há cobertura ou processamento pendente"
@@ -80,6 +135,7 @@ def status_message(metrics: dict, errors: list[str]) -> str:
         f"Janela: {metrics.get('since', 'não informada')}\n"
         f"Publicações DJEN capturadas: {metrics.get('djen_documents', 0)}\n"
         f"Páginas DJEN consultadas: {metrics.get('djen_pages', 0)}\n"
+        f"Sinais DataJud (expedição precatório/RPV): {metrics.get('datajud_documents', 0)} em {metrics.get('datajud_ok', 0)}/{metrics.get('tribunals', 0)} tribunais\n"
         f"Classificações neste ciclo: {metrics.get('classified', 0)}\n"
         f"Candidatos novos com valor mínimo: {metrics.get('opportunities', 0)}\n"
         f"Alertas enviados: {metrics.get('alerts', 0)}\n"
@@ -107,36 +163,32 @@ async def maybe_send_status(metrics: dict, errors: list[str]):
         storage.set_state("last_status", {"at": now.isoformat()})
 
 
-async def _collect_datajud(since: datetime, metrics: dict, errors: list[str]):
+async def _collect_datajud(metrics: dict, errors: list[str]):
+    """Sinais de expedição de precatório/RPV no DataJud, com cursor por tribunal."""
     if not settings.enable_datajud:
         metrics["datajud_disabled"] = True
         return
-    client = DataJudClient()
     aliases = [canonical_alias(x) for x in settings.datajud_tribunals.split(",") if x.strip()]
     for alias in aliases:
         metrics["tribunals"] += 1
+        key = "datajud_cursor:" + alias
         try:
-            data = await client.search(alias, build_query(since))
-            hits_data = data.get("hits", {})
-            hits = hits_data.get("hits", [])
-            total = hits_data.get("total", {})
-            total = total.get("value", 0) if isinstance(total, dict) else int(total or 0)
-            if total > len(hits):
-                metrics["limited"] = True
-            for hit in hits:
-                source = hit.get("_source") or {}
-                cnj = canonical_cnj(source.get("numeroProcesso") or "")
-                if not cnj:
-                    continue
-                storage.upsert_document({
-                    "source": "datajud", "external_id": alias + ":" + cnj,
-                    "siglaTribunal": alias, "numeroProcesso": cnj, "link": source.get("url"),
-                    "texto": json.dumps(source, ensure_ascii=False), "metadata": source,
-                })
-                metrics["datajud_documents"] += 1
+            if simulated("datajud"):
+                raise DataJudError("falha simulada")
+            rows, cursor, info = await collect_expeditions(alias, storage.get_state(key))
+            for row in rows:
+                storage.upsert_document(row)
+            storage.set_state(key, cursor)  # só avança depois de gravar tudo
+            metrics["datajud_documents"] += info["documents"]
+            metrics["datajud_pages"] += info["pages"]
+            metrics["datajud_ok"] += 1
+            if not info["exhausted"]:
+                metrics["datajud_backlog"] = True
         except Exception as exc:
-            errors.append(f"datajud {alias}: {storage.safe_error(exc)}")
-            log.error("DataJud %s indisponível: %s", alias, storage.safe_error(exc))
+            reason = str(exc) if isinstance(exc, DataJudError) else storage.safe_error(exc)
+            metrics["datajud_failed"].append(alias)
+            errors.append(f"datajud {alias}: {reason}")
+            log.error("DataJud %s indisponível: %s", alias, reason)
 
 
 async def _process_queue(metrics: dict, errors: list[str]):
@@ -158,9 +210,13 @@ async def _process_queue(metrics: dict, errors: list[str]):
                 metrics["below_minimum"] += 1
                 continue
             # Nunca marca como concluído antes da resposta da IA e persistência.
-            result = await classifier.classify(text[:18000])
+            if simulated("ia"):
+                result = {"error": True, "reason": "falha simulada da IA"}
+            else:
+                result = await classifier.classify(text[:18000])
             metrics["classified"] += 1
             if result.get("error"):
+                metrics["ai_failed"] = metrics.get("ai_failed", 0) + 1
                 reason = str(result.get("reason") or "provedores indisponíveis")[:240]
                 storage.finish_document(doc, "retry", error=reason)
                 errors.append("ia: " + reason)
@@ -168,6 +224,7 @@ async def _process_queue(metrics: dict, errors: list[str]):
                 if "resposta" in reason or "ValueError" in reason:
                     continue
                 break
+            metrics["ai_ok"] = metrics.get("ai_ok", 0) + 1
             if not result.get("is_opportunity"):
                 status = "needs_enrichment" if result.get("needs_enrichment") or result.get("need_enrichment") else "rejected"
                 storage.finish_document(doc, status, result)
@@ -198,17 +255,27 @@ async def _process_queue(metrics: dict, errors: list[str]):
 async def _send_pending_alerts(metrics: dict, errors: list[str]):
     for opp in storage.pending_alerts(settings.max_classify_per_cycle):
         try:
+            if simulated("telegram"):
+                raise RuntimeError("Telegram: falha simulada")
+            try:
+                opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+            except Exception:
+                opp["datajud_signal"] = None
             await send_alert(format_alert(opp))
             storage.mark_alerted(opp["id"])
             metrics["alerts"] += 1
         except Exception as exc:
-            errors.append("telegram: " + storage.safe_error(exc))
-            log.error("Alerta continua pendente: %s", storage.safe_error(exc))
+            reason = str(exc) if str(exc).startswith("Telegram") else storage.safe_error(exc)
+            errors.append("telegram: " + reason)
+            metrics["alerts_failed"] = metrics.get("alerts_failed", 0) + 1
+            log.error("Alerta continua pendente: %s", reason)
             break
 
 
 async def run_cycle(lookback_minutes: int | None = None) -> dict:
     require_configuration()
+    if simulated("db"):
+        raise storage.DatabaseUnavailable("Banco: causa=falha_simulada | como corrigir: remova SIMULATE_FAILURE")
     with storage.collector_lock() as locked:
         if not locked:
             log.warning("Outro coletor já está executando; ciclo não duplicado")
@@ -226,43 +293,57 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
         else:
             since = now - timedelta(minutes=max(1, lookback_minutes))
         metrics = {"since": since.isoformat(), "djen_documents": 0, "djen_pages": 0,
-                   "datajud_documents": 0, "tribunals": 0, "classified": 0,
-                   "opportunities": 0, "alerts": 0, "below_minimum": 0, "limited": False}
+                   "datajud_documents": 0, "datajud_pages": 0, "datajud_ok": 0, "datajud_failed": [],
+                   "tribunals": 0, "classified": 0, "ai_ok": 0, "ai_failed": 0,
+                   "opportunities": 0, "alerts": 0, "alerts_failed": 0, "below_minimum": 0, "limited": False}
+        if settings.simulate_failure:
+            metrics["simulated_failure"] = settings.simulate_failure
         errors = []
-        run_id = storage.start_run()
+        sources = ["djen"] + (["datajud"] if settings.enable_datajud else [])
+        run_id = storage.start_run(sources, "simulation" if settings.simulate_failure else "scheduled")
         try:
             cursor = storage.get_state("djen_cursor") or None
             query_since = date.fromisoformat(cursor["since"]) if cursor else since.date()
             query_until = date.fromisoformat(cursor["until"]) if cursor else now.date()
-            batch = await search_djen(query_since, query_until, cursor=cursor)
-            metrics["djen_documents"] = len(batch.rows)
-            metrics["djen_pages"] = batch.pages
-            metrics["djen_totals"] = batch.totals
-            metrics["limited"] = batch.limited
-            errors.extend(batch.errors)
-            for row in batch.rows:
-                storage.upsert_document(row)
-            storage.set_state("djen_cursor", batch.cursor or {})
-            await recover_queries(batch, metrics, errors, now)
-            await _collect_datajud(since, metrics, errors)
+            with timed(metrics, "djen"):
+                if simulated("djen"):
+                    batch = SimpleNamespace(rows=[], pages=0, totals={}, limited=False, cursor=cursor,
+                                            errors=["djen_simulado: falha simulada da fonte"], retry_cursors=[])
+                else:
+                    batch = await search_djen(query_since, query_until, cursor=cursor)
+                metrics["djen_documents"] = len(batch.rows)
+                metrics["djen_pages"] = batch.pages
+                metrics["djen_totals"] = batch.totals
+                metrics["limited"] = batch.limited
+                errors.extend(batch.errors)
+                for row in batch.rows:
+                    storage.upsert_document(row)
+                if not simulated("djen"):
+                    storage.set_state("djen_cursor", batch.cursor or {})
+                    await recover_queries(batch, metrics, errors, now)
+            with timed(metrics, "datajud"):
+                await _collect_datajud(metrics, errors)
             if settings.enable_tjsp_probe:
-                # Monitoramento explicitamente separado da descoberta.
+                # Monitoramento explicitamente separado da descoberta (sem contornar captcha).
                 probes = await probe_tjsp_pages()
                 metrics["tjsp_probe_available"] = len(probes)
-            await _process_queue(metrics, errors)
-            await _send_pending_alerts(metrics, errors)
+            with timed(metrics, "ia"):
+                await _process_queue(metrics, errors)
+            with timed(metrics, "telegram"):
+                await _send_pending_alerts(metrics, errors)
             metrics["queue"] = storage.queue_counts()
+            outcome = decide_outcome(metrics, errors)
+            metrics["outcome"] = outcome
             try:
                 await maybe_send_status(metrics, errors)
             except Exception as exc:
                 errors.append("status_telegram: " + storage.safe_error(exc))
-            outcome = "degraded" if errors else "partial" if metrics["limited"] else "success"
-            if batch.cursor is None:
+            if outcome != "source_failed" and batch.cursor is None:
                 covered = min(now, datetime.combine(query_until + timedelta(days=1), datetime.min.time(), timezone.utc))
                 storage.set_state("last_collection", {"at": covered.isoformat()})
             storage.set_state("last_health", {"at": datetime.now(timezone.utc).isoformat(), "outcome": outcome})
             storage.finish_run(run_id, outcome, metrics, errors)
-            log.info("Ciclo concluído: %s", json.dumps({"outcome": outcome, **metrics, "errors": errors}, ensure_ascii=False))
+            log.info("Ciclo concluído: %s", json.dumps({"outcome": outcome, **metrics, "errors": errors}, ensure_ascii=False, default=str))
             return {"outcome": outcome, **metrics, "errors": errors}
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
@@ -270,13 +351,16 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
             else:
                 error = storage.safe_error(exc)
             errors.append("ciclo: " + error)
-            storage.finish_run(run_id, "failed", metrics, errors)
+            try:
+                storage.finish_run(run_id, "failed", metrics, errors)
+            except Exception:
+                log.error("Não foi possível registrar a falha do ciclo no banco")
             raise
 
 
 async def poll_once(lookback_minutes: int | None = None) -> int:
     result = await run_cycle(lookback_minutes)
-    if result["errors"]:
+    if OUTCOME_EXIT.get(result["outcome"], EXIT_UNEXPECTED) != EXIT_OK:
         raise CycleFailure("Ciclo com falhas: " + "; ".join(result["errors"][:5]))
     return result["opportunities"]
 
@@ -288,7 +372,7 @@ async def run_forever():
         interval = settings.poll_interval_minutes
         try:
             result = await asyncio.wait_for(run_cycle(), timeout=settings.cycle_timeout_seconds)
-            if result["outcome"] in ("partial", "degraded", "failed"):
+            if result["outcome"] not in ("success", "skipped"):
                 interval = min(interval, 5)
         except Exception as exc:
             log.error("Ciclo não concluído: %s", storage.safe_error(exc))
@@ -297,30 +381,79 @@ async def run_forever():
         await asyncio.sleep(max(0, delay))
 
 
+def write_summary(result: dict | None, failure: str | None = None):
+    """Resumo sanitizado no painel do GitHub Actions (somente métricas e erros sem segredos)."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    lines = ["## Garimpo ASPIN — resultado do ciclo", ""]
+    if failure:
+        lines += [f"**Resultado:** `failed`", "", f"**Causa:** {failure}"]
+    elif result:
+        outcome = result.get("outcome")
+        lines += [f"**Resultado:** `{outcome}`", ""]
+        if outcome == "success" and not result.get("opportunities"):
+            lines += ["Busca concluída sem oportunidades novas acima do mínimo (isto é um resultado, não uma falha).", ""]
+        rows = [("Janela desde", result.get("since")), ("Páginas DJEN", result.get("djen_pages")),
+                ("Publicações DJEN", result.get("djen_documents")),
+                ("Tribunais DataJud ok/total", f"{result.get('datajud_ok', 0)}/{result.get('tribunals', 0)}"),
+                ("Sinais DataJud", result.get("datajud_documents")), ("Classificações IA ok/falhas", f"{result.get('ai_ok', 0)}/{result.get('ai_failed', 0)}"),
+                ("Oportunidades novas", result.get("opportunities")), ("Alertas enviados", result.get("alerts")),
+                ("Fila", json.dumps(result.get("queue", {}), ensure_ascii=False)),
+                ("Duração (s)", json.dumps(result.get("duration_s", {}), ensure_ascii=False))]
+        lines += ["| Métrica | Valor |", "|---|---|"] + [f"| {k} | {v} |" for k, v in rows]
+        if result.get("errors"):
+            lines += ["", "**Falhas registradas:**"] + [f"- {e}" for e in result["errors"][:20]]
+    try:
+        with open(path, "a", encoding="utf-8") as out:
+            out.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="Coletor ASPIN com fila persistente e diagnóstico explícito")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--check-config", action="store_true")
+    parser.add_argument("--check-db", action="store_true", help="testa a conexão PostgreSQL e mostra a causa sanitizada")
     parser.add_argument("--lookback-minutes", type=int)
+    parser.add_argument("--simulate-failure", choices=SIMULATIONS, help="falha deliberada para validar o caminho de erro")
     args = parser.parse_args()
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    if args.simulate_failure:
+        settings.simulate_failure = args.simulate_failure
     try:
+        if args.check_db:
+            if not settings.database_url.strip():
+                raise CycleFailure("Configuração incompleta: DATABASE_URL")
+            print(storage.check_connection())
+            return EXIT_OK
         require_configuration()
         if args.check_config:
             print("Configuração obrigatória presente. Conexões ainda precisam de validação online.")
-            return 0
+            return EXIT_OK
         if args.once:
             result = asyncio.run(asyncio.wait_for(run_cycle(args.lookback_minutes), timeout=settings.cycle_timeout_seconds))
-            print(json.dumps(result, ensure_ascii=False))
-            return 1 if result["errors"] else 0
+            print(json.dumps(result, ensure_ascii=False, default=str))
+            write_summary(result)
+            code = OUTCOME_EXIT.get(result["outcome"], EXIT_UNEXPECTED)
+            if code != EXIT_OK:
+                log.error("Ciclo terminou como %s (exit %s): %s", result["outcome"], code, "; ".join(result["errors"][:5]))
+            return code
         asyncio.run(run_forever())
-        return 0
+        return EXIT_OK
     except CycleFailure as exc:
         log.error("%s", exc)
-        return 2
+        write_summary(None, str(exc))
+        return EXIT_CONFIG
+    except storage.DatabaseUnavailable as exc:
+        log.error("Banco inacessível. %s", exc)
+        write_summary(None, f"Banco inacessível. {exc}")
+        return EXIT_DATABASE
     except Exception as exc:
         log.error("Execução falhou: %s", storage.safe_error(exc))
-        return 1
+        write_summary(None, storage.safe_error(exc))
+        return EXIT_UNEXPECTED
 
 
 if __name__ == "__main__":

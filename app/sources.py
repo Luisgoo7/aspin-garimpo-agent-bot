@@ -19,14 +19,23 @@ log = logging.getLogger(__name__)
 DJEN_URL = "https://comunicaapi.pje.jus.br/api/v1/comunicacao"
 DJEN_USER_AGENT = "ASPIN-Garimpo/1.0"
 # Termos deliberadamente distintos. KEYWORDS continua sendo o helper de classificação.
+# Medido em 16/10/2026 (100 itens por termo): % com valor >= R$ 100 mil citado.
+# "precatório" (11%) e "RPV" (HTTP 500 "sistema muito ocupado") saíram por baixa
+# precisão/instabilidade; "expedição de precatório" (34%) e "expeça-se precatório" entraram.
 DJEN_TERMS = (
     "ofício requisitório",
+    "expedição de precatório",
     "requisição de pagamento",
     "expedição de RPV",
-    "precatório",
-    "RPV",
+    "expeça-se precatório",
     "ordem de pagamento",
 )
+
+
+def djen_queries() -> list[tuple[str, str | None]]:
+    """Pares (termo, tribunal). DJEN_TRIBUNALS vazio = todos os tribunais do DJEN."""
+    tribunals = [t.strip().upper() for t in str(_setting("djen_tribunals", "") or "").split(",") if t.strip()]
+    return [(term, tribunal) for term in DJEN_TERMS for tribunal in (tribunals or [None])]
 
 TJSP_URLS = {
     "tjsp_requisitorios": "https://esaj.tjsp.jus.br/esaj?servico=950000",
@@ -203,6 +212,13 @@ async def _fetch_page(
         if not isinstance(payload, dict):
             _append_error(errors, "djen_shape: resposta JSON não é objeto")
             return _PageFetch()
+        if str(payload.get("status", "")).casefold() == "error" and not isinstance(payload.get("items"), list):
+            # A API responde {"status":"error","message":"O sistema está muito ocupado"}.
+            retry_reason = "djen_busy"
+            if attempt + 1 < timeout_retries:
+                continue
+            _append_error(errors, f"djen_busy: API ocupada após {timeout_retries} tentativas")
+            return _PageFetch()
         return _PageFetch(payload=payload)
 
     _append_error(errors, "djen_network: tentativas esgotadas")
@@ -248,7 +264,7 @@ def _next_cursor(
 ) -> dict | None:
     if has_more:
         return _make_cursor(since, until, date_index, term_index, page + 1)
-    if term_index + 1 < len(DJEN_TERMS):
+    if term_index + 1 < len(djen_queries()):
         return _make_cursor(since, until, date_index, term_index + 1, 1)
     if date_index + 1 < date_count:
         return _make_cursor(since, until, date_index + 1, 0, 1)
@@ -299,13 +315,13 @@ async def search_djen(
             or date_index < 0
             or date_index >= date_count
             or term_index < 0
-            or term_index >= len(DJEN_TERMS)
+            or term_index >= len(djen_queries())
             or page < 1
         ):
-            result.errors.append("djen_cursor: posição inválida")
-            result.limited = True
-            result.cursor = _make_cursor(since, until, 0, 0, 1)
-            return result
+            # Lista de termos/tribunais mudou desde a última execução: recomeça a
+            # janela do início. Não é falha da fonte.
+            log.warning("Cursor DJEN incompatível com a configuração atual; recomeçando a janela")
+            date_index, term_index, page = 0, 0, 1
 
     page_size = _positive_int("djen_page_size", 50)
     max_pages = _positive_int("djen_max_pages", 10)
@@ -314,6 +330,7 @@ async def search_djen(
     request_delay = _nonnegative_float("djen_request_delay", 0.5)
     timeout_seconds = _nonnegative_float("djen_timeout_seconds", 30.0) or 30.0
 
+    queries = djen_queries()
     unique_rows: dict[str, dict] = {}
     request_count = [0]
     stop_all = False
@@ -328,9 +345,9 @@ async def search_djen(
     ) as client:
         while date_index < date_count and not stop_all:
             day = dates[date_index]
-            while term_index < len(DJEN_TERMS) and not stop_all:
-                term = DJEN_TERMS[term_index]
-                key = f"{day.isoformat()}:{term}"
+            while term_index < len(queries) and not stop_all:
+                term, tribunal = queries[term_index]
+                key = f"{day.isoformat()}:{term}" + (f":{tribunal}" if tribunal else "")
                 result.totals.setdefault(key, 0)
                 page_in_cycle = page_counts.get(key, 0)
                 # count é o total da consulta; ao retomar, as páginas anteriores
@@ -355,6 +372,8 @@ async def search_djen(
                         "pagina": page,
                         "meio": "D",
                     }
+                    if tribunal:
+                        params["siglaTribunal"] = tribunal
                     fetched = await _fetch_page(
                         client,
                         params,

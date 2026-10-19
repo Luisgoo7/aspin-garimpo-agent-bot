@@ -10,13 +10,21 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .config import settings
-from .opportunity import canonical_alias, canonical_cnj, clean_text, keyword_score
+from .dbcheck import diagnose, format_diagnosis
+from .opportunity import canonical_alias, canonical_cnj, clean_text, keyword_score, max_amount_in_text
 
 LOCK_ID = 418739261
+MIGRATIONS = ("001_initial_schema.sql", "002_sources_and_runs.sql", "003_reliable_processing.sql", "004_prefilter_and_signals.sql")
+
+
+class DatabaseUnavailable(RuntimeError):
+    """Falha de conexão com causa sanitizada (sem DSN, usuário ou senha)."""
 
 
 def safe_error(exc: Exception) -> str:
     """Não inclui URL, corpo HTTP, DSN ou credenciais na mensagem operacional."""
+    if isinstance(exc, DatabaseUnavailable):
+        return str(exc)
     response = getattr(exc, "response", None)
     code = getattr(response, "status_code", None)
     return type(exc).__name__ + (f" HTTP {code}" if code else "")
@@ -26,16 +34,23 @@ def connect():
     for attempt in range(3):
         try:
             return psycopg.connect(settings.database_url, connect_timeout=15, row_factory=dict_row)
-        except psycopg.OperationalError:
+        except psycopg.OperationalError as exc:
             if attempt == 2:
-                raise
+                raise DatabaseUnavailable(format_diagnosis(diagnose(settings.database_url, exc))) from None
             time.sleep(2 ** attempt)
+
+
+def check_connection() -> str:
+    """Testa a conexão e devolve o diagnóstico sanitizado do alvo."""
+    with connect() as conn:
+        version = conn.execute("show server_version").fetchone()["server_version"]
+    return format_diagnosis(diagnose(settings.database_url)) + f" | conexão=ok, postgres={version.split()[0]}"
 
 
 def ensure_schema():
     root = Path(__file__).resolve().parent.parent
     with connect() as conn:
-        for name in ("001_initial_schema.sql", "002_sources_and_runs.sql", "003_reliable_processing.sql"):
+        for name in MIGRATIONS:
             conn.execute((root / name).read_text(encoding="utf-8"))
 
 
@@ -67,14 +82,15 @@ def upsert_document(row: dict) -> str:
     digest = hashlib.sha256(text.encode()).hexdigest()
     alias = canonical_alias(row.get("siglaTribunal") or row.get("tribunal_alias") or "djen")
     cnj = canonical_cnj(row.get("numero_processo") or row.get("numeroProcesso") or "")
-    status = "pending" if keyword_score(text) > 0.25 and source != "tjsp_probe" else "ignored"
+    amount = max_amount_in_text(text)
+    status = initial_status(source, text, amount)
     with connect() as conn:
         record = conn.execute("""insert into public.source_documents
-            (source,tribunal_alias,external_id,process_number,published_at,title,text_excerpt,document_url,raw_data,content_hash,processing_status)
-            values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            (source,tribunal_alias,external_id,process_number,published_at,title,text_excerpt,document_url,raw_data,content_hash,processing_status,prefilter_amount)
+            values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             on conflict(source,external_id) do update set
             text_excerpt=excluded.text_excerpt,document_url=excluded.document_url,raw_data=excluded.raw_data,
-            content_hash=excluded.content_hash,updated_at=now(),
+            content_hash=excluded.content_hash,updated_at=now(),prefilter_amount=excluded.prefilter_amount,
             processing_status=case when source_documents.content_hash is distinct from excluded.content_hash
                 then excluded.processing_status else source_documents.processing_status end,
             processing_attempts=case when source_documents.content_hash is distinct from excluded.content_hash
@@ -84,8 +100,28 @@ def upsert_document(row: dict) -> str:
             returning id""", (source, alias, source_key(row), cnj or None,
             row.get("data_disponibilizacao") or row.get("dataDisponibilizacao"),
             row.get("tipoComunicacao") or row.get("title"), text,
-            row.get("link") or row.get("document_url"), Jsonb(row), digest, status)).fetchone()
+            row.get("link") or row.get("document_url"), Jsonb(row), digest, status, amount)).fetchone()
         return record["id"]
+
+
+def initial_status(source: str, text: str, amount: float | None) -> str:
+    """Pré-filtro local: só vai para a IA o que tem sinal e valor citado acima do mínimo.
+
+    Sem valor citado o alerta seria impossível (o alerta exige valor), então o
+    documento fica guardado como needs_enrichment sem gastar IA. Sinais do
+    DataJud são metadados de movimento, sem texto/valor: ficam como signal.
+    """
+    if source == "tjsp_probe":
+        return "ignored"
+    if source == "datajud":
+        return "signal"
+    if keyword_score(text) <= 0.25:
+        return "ignored"
+    if amount is None:
+        return "needs_enrichment"
+    if amount < settings.min_opportunity_amount:
+        return "below_minimum"
+    return "pending"
 
 
 def claim_document() -> dict | None:
@@ -95,11 +131,12 @@ def claim_document() -> dict | None:
             ((processing_status in ('pending','retry') and next_attempt_at<=now()) or
              (processing_status='processing' and processing_started_at<now()-interval '30 minutes'))
             and processing_attempts<%s
-            order by (text_excerpt ~ 'R\\$') desc,published_at desc nulls last,first_seen_at
+            and (published_at is null or published_at>=now()-make_interval(days=>%s))
+            order by prefilter_amount desc nulls last,published_at desc nulls last,first_seen_at
             for update skip locked limit 1)
             update public.source_documents d set processing_status='processing',processing_started_at=now(),
             processing_attempts=processing_attempts+1 from candidate where d.id=candidate.id returning d.*""",
-            (settings.max_processing_attempts,)).fetchone()
+            (settings.max_processing_attempts, settings.max_document_age_days)).fetchone()
 
 
 def finish_document(doc: dict, status: str, result: dict | None = None, error: str | None = None):
@@ -166,8 +203,26 @@ def pending_alerts(limit: int = 120) -> list[dict]:
 
 
 def mark_alerted(opp_id):
+    # Já enviado ao Telegram: insiste na marcação para não reenviar no próximo ciclo.
+    for attempt in range(3):
+        try:
+            with connect() as conn:
+                conn.execute("update public.opportunities set alerted_at=now() where id=%s and alerted_at is null", (opp_id,))
+            return
+        except (psycopg.OperationalError, DatabaseUnavailable):
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
+
+
+def datajud_signal(cnj: str | None) -> dict | None:
+    """Movimento 'Expedição de precatório/RPV' visto no DataJud para o processo."""
+    cnj = canonical_cnj(cnj or "")
+    if not cnj:
+        return None
     with connect() as conn:
-        conn.execute("update public.opportunities set alerted_at=now() where id=%s", (opp_id,))
+        return conn.execute("""select tribunal_alias,published_at from public.source_documents
+            where source='datajud' and process_number=%s order by published_at desc nulls last limit 1""", (cnj,)).fetchone()
 
 
 def get_state(key: str) -> dict:
@@ -182,10 +237,10 @@ def set_state(key: str, value: dict):
             on conflict(key) do update set value=excluded.value,updated_at=now()""", (key, Jsonb(value)))
 
 
-def start_run() -> str:
+def start_run(sources: list[str] | None = None, mode: str = "scheduled") -> str:
     with connect() as conn:
         return conn.execute("insert into public.collection_runs(mode,sources) values(%s,%s) returning id",
-            ("scheduled", Jsonb(["djen", "datajud"]))).fetchone()["id"]
+            (mode, Jsonb(sources or ["djen", "datajud"]))).fetchone()["id"]
 
 
 def finish_run(run_id, outcome: str, metrics: dict, errors: list[str]):

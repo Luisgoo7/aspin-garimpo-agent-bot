@@ -1,5 +1,6 @@
 import asyncio
 import os
+from datetime import date
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -87,7 +88,7 @@ async def test_pending_telegram_recovers_after_failure(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_poll_once_fails_on_collection_errors(monkeypatch):
-    monkeypatch.setattr(worker, "run_cycle", AsyncMock(return_value={"opportunities": 0, "errors": ["datajud indisponível"]}))
+    monkeypatch.setattr(worker, "run_cycle", AsyncMock(return_value={"outcome": "source_failed", "opportunities": 0, "errors": ["datajud indisponível"]}))
     with pytest.raises(worker.CycleFailure):
         await worker.poll_once()
 
@@ -107,7 +108,7 @@ def test_db(monkeypatch):
 
 
 def source_row():
-    return {"id": "fixture", "siglaTribunal": "TRF1", "numero_processo": "1002747-62.2024.4.01.3600", "texto": "Requisitem-se R$ 135.654,57. Vista do ofício requisitório.", "data_disponibilizacao": "2026-10-16"}
+    return {"id": "fixture", "siglaTribunal": "TRF1", "numero_processo": "1002747-62.2024.4.01.3600", "texto": "Requisitem-se R$ 135.654,57. Vista do ofício requisitório.", "data_disponibilizacao": date.today().isoformat()}
 
 
 def positive():

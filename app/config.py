@@ -2,6 +2,14 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# Endpoints oficiais api_publica_* do DataJud (CNJ). Foco: SP + Justiça Federal + RJ.
+DEFAULT_DATAJUD_TRIBUNALS = ",".join((
+    "api_publica_tjsp", "api_publica_trf3", "api_publica_trf1", "api_publica_trf2",
+    "api_publica_trf4", "api_publica_trf5", "api_publica_trf6", "api_publica_tjrj",
+    "api_publica_tjmg",
+))
+
+
 class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
@@ -17,7 +25,13 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.8-flash"
     nvidia_model: str = "openai/gpt-oss-20b"
     datajud_api_key: str = ""
-    datajud_tribunals: str = "api_publica_trf1"
+    datajud_tribunals: str = DEFAULT_DATAJUD_TRIBUNALS
+    datajud_max_pages: int = Field(default=5, ge=1, le=100)
+    datajud_initial_lookback_days: int = Field(default=30, ge=1, le=120)
+    datajud_max_expedition_age_days: int = Field(default=180, ge=7, le=3650)
+    djen_tribunals: str = ""
+    max_document_age_days: int = Field(default=30, ge=1, le=365)
+    simulate_failure: str = ""
     enable_datajud: bool = True
     enable_tjsp_probe: bool = True
     poll_interval_minutes: int = Field(default=60, ge=5)
@@ -27,7 +41,7 @@ class Settings(BaseSettings):
     min_confidence: float = Field(default=0.78, ge=0, le=1)
     min_opportunity_amount: float = Field(default=100000, ge=0)
     aspin_commission_rate: float = Field(default=0.05, ge=0, le=1)
-    datajud_page_size: int = Field(default=50, ge=1, le=100)
+    datajud_page_size: int = Field(default=100, ge=1, le=1000)
     max_classify_per_cycle: int = Field(default=120, ge=1, le=1000)
     djen_page_size: int = Field(default=50, ge=1, le=100)
     djen_max_pages: int = Field(default=10, ge=1, le=200)

@@ -55,3 +55,13 @@ def canonical_alias(alias: str) -> str:
 def canonical_cnj(value: str) -> str:
     digits = re.sub(r"\D", "", str(value or ""))
     return digits if len(digits) == 20 else str(value or "").strip()
+
+
+_TEXT_AMOUNT_RE = re.compile(r"(?i)(?:r\$|\bvalor\b[^\d]{0,24})\s*(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+,\d{1,2})")
+
+
+def max_amount_in_text(text: str) -> float | None:
+    """Maior valor monetário citado (formato brasileiro), usado só para triagem."""
+    values = [parse_amount(m.group(1)) for m in _TEXT_AMOUNT_RE.finditer(clean_text(text))]
+    values = [v for v in values if v is not None]
+    return max(values) if values else None
