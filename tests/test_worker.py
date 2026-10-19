@@ -1,5 +1,6 @@
 import asyncio
 import os
+from datetime import date, datetime, timezone
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -49,14 +50,14 @@ def test_status_distinguishes_backlog():
 
 def test_alert_does_not_mislabel_gross_as_net():
     msg = worker.format_alert({"amount": 135654.57, "potential_score": 0.9, "alias": "api_publica_trf1", "classification": {"amount_basis": "principal"}})
-    assert "Principal" in msg
+    assert "(principal)" in msg
     assert "Líquido" not in msg
     assert "não retorno garantido" in msg
 
 
 @pytest.mark.asyncio
 async def test_ai_failure_keeps_document_for_retry(monkeypatch):
-    doc = {"id": "doc", "processing_attempts": 1, "text_excerpt": "RPV expedida", "raw_data": {}}
+    doc = {"id": "doc", "processing_attempts": 1, "text_excerpt": "RPV expedida no valor de R$ 200.000,00", "raw_data": {}}
     queue = iter([doc, None])
     finished = []
     monkeypatch.setattr(storage, "claim_document", lambda: next(queue))
@@ -87,7 +88,7 @@ async def test_pending_telegram_recovers_after_failure(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_poll_once_fails_on_collection_errors(monkeypatch):
-    monkeypatch.setattr(worker, "run_cycle", AsyncMock(return_value={"opportunities": 0, "errors": ["datajud indisponível"]}))
+    monkeypatch.setattr(worker, "run_cycle", AsyncMock(return_value={"outcome": "source_failed", "opportunities": 0, "errors": ["datajud indisponível"]}))
     with pytest.raises(worker.CycleFailure):
         await worker.poll_once()
 
@@ -102,12 +103,12 @@ def test_db(monkeypatch):
     monkeypatch.setattr(settings, "database_url", url)
     storage.ensure_schema()
     with storage.connect() as conn:
-        conn.execute("truncate public.opportunities,public.evidence,public.processes,public.source_documents,public.collection_runs,public.audit_log,public.bot_state cascade")
+        conn.execute("truncate public.opportunities,public.evidence,public.processes,public.source_documents,public.collection_runs,public.audit_log,public.bot_state,public.collector_lease cascade")
     return url
 
 
 def source_row():
-    return {"id": "fixture", "siglaTribunal": "TRF1", "numero_processo": "1002747-62.2024.4.01.3600", "texto": "Requisitem-se R$ 135.654,57. Vista do ofício requisitório.", "data_disponibilizacao": "2026-10-16"}
+    return {"id": "fixture", "siglaTribunal": "TRF1", "numero_processo": "1002747-62.2024.4.01.3600", "texto": "Requisitem-se R$ 135.654,57. Vista do ofício requisitório.", "data_disponibilizacao": date.today().isoformat()}
 
 
 def positive():
@@ -166,6 +167,30 @@ def test_advisory_lock_prevents_two_collectors(test_db):
     with storage.collector_lock() as first:
         with storage.collector_lock() as second:
             assert first and not second
+    with storage.collector_lock() as third:
+        assert third  # liberado ao sair
+
+
+def test_expired_lease_from_crashed_collector_is_taken_over(test_db):
+    with storage.connect() as conn:
+        conn.execute("insert into public.collector_lease(name,holder,expires_at) values('garimpo','morto',now()-interval '1 minute')")
+    with storage.collector_lock() as locked:
+        assert locked
+
+
+def test_live_lease_blocks_second_collector(test_db):
+    with storage.connect() as conn:
+        conn.execute("insert into public.collector_lease(name,holder,expires_at) values('garimpo','aspin-garimpo-worker:1:x',now()+interval '10 minutes')")
+    with storage.collector_lock() as locked:
+        assert not locked
+    assert storage.lease_holder().startswith("aspin-garimpo-worker")
+
+
+def test_check_connection_reports_recent_runs(test_db):
+    run = storage.start_run(["djen"])
+    storage.finish_run(run, "success", {}, [])
+    text = storage.check_connection()
+    assert "conexão=ok" in text and "success" in text
 
 
 def test_metrics_are_persisted(test_db):
@@ -187,15 +212,17 @@ async def test_end_to_end_real_database_mocked_external_services(test_db, monkey
     monkeypatch.setattr(worker, "search_djen", AsyncMock(return_value=batch))
     monkeypatch.setattr(worker.LLMClassifier, "classify", AsyncMock(return_value=positive()))
     sender = AsyncMock()
+    from datetime import datetime as _dt, timezone as _tz
+    monkeypatch.setattr(worker, "digest_slot_due", lambda now: _dt(2026, 10, 19, 12, tzinfo=_tz.utc))
     monkeypatch.setattr(worker, "send_alert", sender)
     result = await worker.run_cycle(120)
     assert result["outcome"] == "success"
     assert result["opportunities"] == 1 and result["alerts"] == 1
-    assert sender.await_count == 2  # candidato + status inicial
+    assert sender.await_count == 1  # só a oportunidade; status vai ao canal apenas em falha
     assert storage.pending_alerts() == []
     result2 = await worker.run_cycle(120)
     assert result2["opportunities"] == 0 and result2["alerts"] == 0
-    assert sender.await_count == 2  # sem duplicar nem repetir status fora do intervalo
+    assert sender.await_count == 1  # mesmo horário de entrega: nada reenviado
 
 
 def test_existing_unalerted_record_can_be_enriched(test_db):
@@ -224,3 +251,43 @@ async def test_below_minimum_document_does_not_call_ai(monkeypatch):
     assert finished==['below_minimum']
     assert metrics['below_minimum']==1 and metrics['classified']==0
     classifier.assert_not_awaited()
+
+
+
+def test_pending_alerts_are_ranked_by_expected_value(test_db):
+    storage.upsert_document(source_row())
+    doc = storage.claim_document()
+    low = dict(positive(), amount=150000.0, potential_score=0.95, requisition_type="rpv")
+    high = dict(positive(), amount=900000.0, potential_score=0.80)
+    storage.save_opportunity(doc, low)
+    storage.save_opportunity(doc, high)
+    ranked = storage.pending_alerts(3)
+    assert [float(o["amount"]) for o in ranked] == [900000.0, 150000.0]
+    archived = storage.archive_unselected([ranked[0]["id"]], datetime.now(timezone.utc))
+    assert archived == 1 and len(storage.pending_alerts(3)) == 1
+
+
+def test_backfill_prefilter_triages_old_queue_in_bulk(test_db):
+    rows = [
+        {"id": "sem-valor", "siglaTribunal": "TJSP", "texto": "Expeça-se ofício requisitório."},
+        {"id": "baixo", "siglaTribunal": "TJSP", "texto": "Expeça-se ofício requisitório de R$ 5.000,00"},
+        {"id": "alto", "siglaTribunal": "TJSP", "texto": "Expeça-se ofício requisitório de R$ 450.000,00"},
+    ]
+    for row in rows:
+        storage.upsert_document(row)
+    with storage.connect() as conn:  # simula itens gravados antes do pré-filtro existir
+        conn.execute("update public.source_documents set processing_status='pending', prefilter_amount=null")
+    totals = storage.backfill_prefilter(batch_size=2)
+    assert totals == {"needs_enrichment": 1, "below_minimum": 1, "pending": 1}
+    counts = storage.queue_counts()
+    assert counts["pending"] == 1 and counts["needs_enrichment"] == 1 and counts["below_minimum"] == 1
+    assert storage.backfill_prefilter() == {}
+    assert float(storage.claim_document()["prefilter_amount"]) == 450000.0
+
+
+def test_positive_without_type_or_quote_is_still_saved(test_db):
+    storage.upsert_document(source_row())
+    doc = storage.claim_document()
+    result = dict(positive(), requisition_type=None, evidence_quote="")
+    opp_id, created = storage.save_opportunity(doc, result)
+    assert created and opp_id

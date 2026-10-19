@@ -2,7 +2,8 @@ name: Garimpo ASPIN
 
 on:
   schedule:
-    - cron: '5 * * * *'
+    - cron: '5 * * * *'          # coleta de hora em hora
+    - cron: '0 11,15,21 * * *'   # 08h, 12h e 18h em Brasília: entrega das 3 melhores
   workflow_dispatch:
     inputs:
       lookback_minutes:
@@ -10,15 +11,58 @@ on:
         required: false
         default: ''
         type: string
+      send_preview:
+        description: 'Só enviar ao Telegram uma PRÉVIA da entrega das 12h (não coleta, não conta como entrega)'
+        required: false
+        default: false
+        type: boolean
+      simulate_failure:
+        description: 'Falha deliberada para validar o caminho de erro (o run deve ficar vermelho e registrar o erro)'
+        required: false
+        default: ''
+        type: choice
+        options: ['', djen, datajud, ia, telegram, db]
 
 concurrency:
   group: aspin-garimpo-collector
   cancel-in-progress: false
 
 jobs:
+  tests:
+    name: Testes (inclui PostgreSQL isolado)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aspin
+          POSTGRES_PASSWORD: aspin
+          POSTGRES_DB: aspin_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U aspin -d aspin_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Testes de regressão
+        env:
+          ASPIN_TEST_DATABASE_URL: postgresql://aspin:aspin@localhost:5432/aspin_test
+        run: python -m pytest tests -q -rs
+
   collect:
     name: Validar, coletar e classificar
-    runs-on: ubuntu-latest
+    needs: tests
+    # A API do DJEN recusa IPs fora do Brasil. Com um runner próprio no Brasil
+    # (VM/PC), defina as variáveis RUNNER=self-hosted e ENABLE_DJEN=true.
+    runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 35
     permissions:
       contents: read
@@ -32,19 +76,29 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       DATAJUD_API_KEY: ${{ secrets.DATAJUD_API_KEY }}
-      DATAJUD_TRIBUNALS: ${{ vars.DATAJUD_TRIBUNALS || 'api_publica_trf1' }}
+      DATAJUD_TRIBUNALS: ${{ vars.DATAJUD_TRIBUNALS || 'api_publica_tjsp,api_publica_trf3,api_publica_trf1,api_publica_trf2,api_publica_trf4,api_publica_trf5,api_publica_trf6,api_publica_tjrj,api_publica_tjmg' }}
+      DJEN_TRIBUNALS: ${{ vars.DJEN_TRIBUNALS || '' }}
+      ENABLE_DJEN: ${{ vars.ENABLE_DJEN || 'false' }}
+      SIMULATE_FAILURE: ${{ inputs.simulate_failure || '' }}
       MIN_CONFIDENCE: '0.78'
       MIN_OPPORTUNITY_AMOUNT: '100000'
       ASPIN_COMMISSION_RATE: '0.05'
       POLL_INTERVAL_MINUTES: '60'
-      STATUS_INTERVAL_MINUTES: '120'
+      STATUS_INTERVAL_MINUTES: '360'
       INITIAL_LOOKBACK_DAYS: '7'
       INCREMENTAL_LOOKBACK_MINUTES: '120'
-      MAX_CLASSIFY_PER_CYCLE: '120'
-      DJEN_PAGE_SIZE: '50'
-      DJEN_MAX_PAGES: '10'
-      DJEN_MAX_DOCUMENTS: '2500'
-      DJEN_MAX_REQUESTS: '80'
+      MAX_CLASSIFY_PER_CYCLE: '25'
+      DIGEST_HOURS: '8,12,18'
+      DIGEST_TOP_N: '3'
+      STATUS_TELEGRAM: failures
+      DJEN_PAGE_SIZE: '100'
+      DJEN_MAX_PAGES: '30'
+      DJEN_MAX_DOCUMENTS: '8000'
+      DJEN_MAX_REQUESTS: '150'
+      DATAJUD_PAGE_SIZE: '100'
+      DATAJUD_MAX_PAGES: '2'
+      AI_TIME_BUDGET_SECONDS: '900'
+      DATAJUD_TIME_BUDGET_SECONDS: '300'
     steps:
       - name: Baixar código
         uses: actions/checkout@v4
@@ -54,17 +108,7 @@ jobs:
           python-version: '3.11'
           cache: pip
       - name: Instalar dependências
-        run: python -m pip install -r requirements.txt -r requirements-dev.txt
-      - name: Testes de regressão
-        run: python -m pytest tests -q
-        env:
-          DATABASE_URL: ''
-          TELEGRAM_BOT_TOKEN: ''
-          TELEGRAM_CHAT_ID: ''
-          GROQ_API_KEY: ''
-          GEMINI_API_KEY: ''
-          NVIDIA_API_KEY: ''
-          DATAJUD_API_KEY: ''
+        run: python -m pip install -r requirements.txt
       - name: Importar configuração protegida
         env:
           ASPIN_CONFIG_BUNDLE: ${{ secrets.ASPIN_ENV || secrets.ACCS }}
@@ -99,7 +143,14 @@ jobs:
           PY
       - name: Verificar configurações obrigatórias
         run: python -m app.worker --check-config
+      - name: Testar conexão com o banco (causa sanitizada)
+        if: ${{ inputs.simulate_failure != 'db' }}
+        run: python -m app.worker --check-db
+      - name: Enviar prévia da entrega
+        if: ${{ inputs.send_preview }}
+        run: python -m app.worker --send-preview
       - name: Executar ciclo auditável
+        if: ${{ !inputs.send_preview }}
         env:
           LOOKBACK_MINUTES: ${{ inputs.lookback_minutes }}
         run: |
