@@ -77,11 +77,12 @@ async def send_alert(text: str) -> None:
     await send_message(text)
 
 
-async def get_updates(offset: int | None) -> list[dict]:
-    payload = {"timeout": 0, "allowed_updates": ["callback_query"], "limit": 100}
+async def get_updates(offset: int | None, poll_seconds: int = 0) -> list[dict]:
+    """poll_seconds > 0 = long polling: a chamada fica aberta e volta assim que houver clique."""
+    payload = {"timeout": poll_seconds, "allowed_updates": ["callback_query"], "limit": 100}
     if offset is not None:
         payload["offset"] = offset
-    result = await _call("getUpdates", payload, require_result=False)
+    result = await _call("getUpdates", payload, timeout=poll_seconds + 20, require_result=False)
     return result if isinstance(result, list) else []
 
 

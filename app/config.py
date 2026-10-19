@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     telegram_approvers: str = ""
     sheet_failure_streak_to_alert: int = Field(default=3, ge=1, le=100)
     collector_max_gap_minutes: int = Field(default=65, ge=10, le=1440)
+    daemon_poll_seconds: int = Field(default=25, ge=1, le=50)
+    daemon_queue_check_seconds: int = Field(default=120, ge=10, le=3600)
     ai_max_chars: int = Field(default=6000, ge=1000, le=30000)
     failure_streak_to_alert: int = Field(default=3, ge=1, le=48)
     digest_max_delay_minutes: int = Field(default=180, ge=10, le=720)

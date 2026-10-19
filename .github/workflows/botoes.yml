@@ -1,8 +1,6 @@
 name: Botões Telegram (Aprovar/Descartar)
 
 on:
-  schedule:
-    - cron: '*/10 * * * *'  # lê os cliques a cada 10 min (o GitHub pode atrasar alguns minutos)
   workflow_dispatch:
 
 concurrency:

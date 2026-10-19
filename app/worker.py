@@ -294,13 +294,13 @@ def _person(user: dict) -> str:
     return name + (f" (@{user['username']})" if user.get("username") else "")
 
 
-async def process_buttons() -> dict:
+async def process_buttons(poll_seconds: int = 0) -> dict:
     """Lê os cliques em Aprovar/Descartar, grava a decisão e envia as aprovadas à planilha."""
     metrics = {"clicks": 0, "approved": 0, "discarded": 0, "ignored": 0, "sheet_ok": 0, "sheet_failed": 0}
     approvers = {x.strip() for x in settings.telegram_approvers.split(",") if x.strip()}
     state = storage.get_state("telegram_updates")
     offset = state.get("offset")
-    updates = await get_updates(offset)
+    updates = await get_updates(offset, poll_seconds) if poll_seconds else await get_updates(offset)
     for update in updates:
         offset = int(update["update_id"]) + 1
         query = update.get("callback_query") or {}
@@ -352,6 +352,9 @@ async def process_buttons() -> dict:
     return metrics
 
 
+LAST_FORMAT_TRY = [float("-inf")]
+
+
 async def sync_sheet(metrics: dict) -> None:
     """Fila de saída: toda aprovação ainda não gravada na planilha é (re)enviada."""
     if not sheets.configured():
@@ -361,7 +364,10 @@ async def sync_sheet(metrics: dict) -> None:
             metrics["sheet_not_configured"] = True
         return
     # Reorganiza/formata a planilha uma vez por versão de layout (após atualizar o script).
-    if storage.get_state("sheet_layout").get("version") != sheets.LAYOUT_VERSION:
+    # No robô sempre ligado, tenta no máximo a cada 10 min enquanto o script novo não estiver publicado.
+    if (storage.get_state("sheet_layout").get("version") != sheets.LAYOUT_VERSION
+            and time.monotonic() - LAST_FORMAT_TRY[0] >= 600):
+        LAST_FORMAT_TRY[0] = time.monotonic()
         try:
             await sheets.format_sheet()
             storage.set_state("sheet_layout", {"version": sheets.LAYOUT_VERSION})
@@ -918,6 +924,102 @@ async def dispatch_collector(reason: str) -> bool:
     return True
 
 
+DAEMON_WORKFLOW = "robo.yml"
+
+
+async def _github(method: str, path: str, **kwargs):
+    token = os.environ.get("GITHUB_TOKEN", "")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if not token or not repo:
+        return None
+    import httpx
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        return await client.request(method, f"https://api.github.com/repos/{repo}/{path}", headers=headers, **kwargs)
+
+
+async def queued_runs() -> list[dict]:
+    """Execuções do repositório esperando o runner (exceto a atual)."""
+    try:
+        response = await _github("GET", "actions/runs?status=queued&per_page=30")
+        runs = response.json().get("workflow_runs", []) if response is not None and response.status_code < 300 else []
+    except Exception:
+        return []
+    me = os.environ.get("GITHUB_RUN_ID", "")
+    return [r for r in runs if str(r.get("id")) != me]
+
+
+async def redispatch_daemon() -> bool:
+    """Agenda a próxima execução do robô (se já não houver uma na fila)."""
+    if any(str(r.get("path", "")).endswith(DAEMON_WORKFLOW) for r in await queued_runs()):
+        return False
+    response = await _github("POST", f"actions/workflows/{DAEMON_WORKFLOW}/dispatches",
+                             json={"ref": os.environ.get("GITHUB_REF_NAME") or "main"})
+    return response is not None and response.status_code < 300
+
+
+async def _daemon_cycle(reason: str) -> dict | None:
+    log.info("Robô: iniciando coleta (%s)", reason)
+    try:
+        result = await asyncio.wait_for(run_cycle(), timeout=settings.cycle_timeout_seconds)
+        log.info("Robô: coleta terminou como %s", result.get("outcome"))
+        return result
+    except Exception as exc:
+        log.error("Robô: coleta falhou: %s", storage.safe_error(exc))
+        return None
+
+
+async def run_daemon(max_minutes: float) -> dict:
+    """Robô sempre ligado: escuta os cliques (resposta em segundos) e roda coleta/entregas.
+
+    Não depende do agendamento do GitHub. Ao chegar perto do limite de tempo do job, ou
+    quando há outra execução esperando o runner (ex.: teste manual), termina a coleta em
+    andamento, agenda a próxima execução de si mesmo e sai.
+    """
+    started = time.monotonic()
+    deadline = started + max_minutes * 60
+    totals = {"clicks": 0, "approved": 0, "discarded": 0, "sheet_ok": 0, "cycles": 0, "errors": 0}
+    cycle: asyncio.Task | None = None
+    last_queue_check = started
+    yielding = False
+    while True:
+        now = time.monotonic()
+        if cycle is not None and cycle.done():
+            totals["cycles"] += 1
+            cycle = None
+        if cycle is None and not yielding and now < deadline - settings.cycle_timeout_seconds:
+            try:
+                reason = collector_dispatch_reason()
+            except Exception as exc:
+                reason = None
+                log.warning("Robô: vigia indisponível: %s", storage.safe_error(exc))
+            if reason:
+                cycle = asyncio.create_task(_daemon_cycle(reason))
+        try:
+            result = await process_buttons(poll_seconds=settings.daemon_poll_seconds)
+            for key in ("clicks", "approved", "discarded", "sheet_ok"):
+                totals[key] += result.get(key, 0)
+        except Exception as exc:
+            totals["errors"] += 1
+            log.warning("Robô: leitura de cliques falhou: %s", storage.safe_error(exc))
+            await asyncio.sleep(5)
+        now = time.monotonic()
+        if not yielding and now - last_queue_check >= settings.daemon_queue_check_seconds:
+            last_queue_check = now
+            others = [r for r in await queued_runs() if not str(r.get("path", "")).endswith(DAEMON_WORKFLOW)]
+            if others:
+                log.info("Robô: outra execução aguardando o runner; encerrando para dar passagem")
+                yielding = True
+        if (yielding or now >= deadline) and (cycle is None or cycle.done()):
+            break
+    if cycle is not None and cycle.done():
+        totals["cycles"] += 1
+    totals["redispatched"] = await redispatch_daemon()
+    totals["minutes"] = round((time.monotonic() - started) / 60, 1)
+    return totals
+
+
 def buttons_exit_code(result: dict) -> int:
     """Falha da planilha é tolerada (a aprovação fica na fila); vermelho só se persistir."""
     state = storage.get_state("sheet_failures")
@@ -988,11 +1090,20 @@ def main():
     parser.add_argument("--simulate-failure", choices=SIMULATIONS, help="falha deliberada para validar o caminho de erro")
     parser.add_argument("--send-preview", action="store_true", help="envia ao canal uma prévia da entrega das 12h")
     parser.add_argument("--process-buttons", action="store_true", help="processa cliques Aprovar/Descartar e grava na planilha")
+    parser.add_argument("--daemon", action="store_true", help="robô sempre ligado: cliques em tempo real + coleta/entregas")
+    parser.add_argument("--max-minutes", type=float, default=340, help="duração máxima do robô antes de se reiniciar")
     args = parser.parse_args()
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     if args.simulate_failure:
         settings.simulate_failure = args.simulate_failure
     try:
+        if args.daemon:
+            require_configuration()
+            storage.ensure_schema()
+            totals = asyncio.run(run_daemon(args.max_minutes))
+            print(json.dumps(totals, ensure_ascii=False))
+            write_buttons_summary(totals)
+            return EXIT_OK
         if args.process_buttons:
             require_configuration()
             storage.ensure_schema()
