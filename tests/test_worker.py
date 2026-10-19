@@ -312,7 +312,7 @@ def test_decision_is_recorded_once_and_feeds_sheet_outbox(test_db):
 
 def test_bulk_upsert_matches_single_upsert_and_is_idempotent(test_db):
     rows = [{"id": f"lote-{i}", "siglaTribunal": "TJSP", "numero_processo": "1002747-62.2024.4.01.3600",
-             "texto": f"Expeça-se ofício requisitório de R$ {200 + i}.000,00", "data_disponibilizacao": date.today().isoformat()}
+             "texto": "Expeça-se ofício requisitório de R$ " + f"{(200 + i) * 1000:,}".replace(",", ".") + ",00", "data_disponibilizacao": date.today().isoformat()}
             for i in range(1200)]
     assert storage.upsert_documents(rows, batch_size=500) == 1200
     assert storage.upsert_documents(rows, batch_size=500) == 1200  # reexecução não duplica
