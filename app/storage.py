@@ -195,6 +195,45 @@ def initial_status(source: str, text: str, amount: float | None) -> str:
     return "pending"
 
 
+def backfill_prefilter(batch_size: int = 2000, time_budget: float = 120.0) -> dict:
+    """Aplica o pré-filtro em lote aos itens antigos da fila (sem prefilter_amount).
+
+    Uma consulta lê milhares de textos e uma única atualização grava o resultado,
+    em vez de uma ida e volta ao banco por documento.
+    """
+    started = time.monotonic()
+    totals: dict[str, int] = {}
+    with connect() as conn:
+        while time.monotonic() - started < time_budget:
+            rows = conn.execute("""select id,source,text_excerpt from public.source_documents
+                where processing_status in ('pending','retry') and prefilter_amount is null
+                and coalesce(classification->>'rule','') <> 'pre_filtro_lote'
+                limit %s""", (batch_size,)).fetchall()
+            if not rows:
+                break
+            ids, statuses, amounts = [], [], []
+            for row in rows:
+                text = clean_text(row["text_excerpt"] or "")
+                amount = max_amount_in_text(text)
+                status = initial_status(row["source"] or "djen", text, amount)
+                ids.append(row["id"])
+                statuses.append(status)
+                amounts.append(amount)
+                totals[status] = totals.get(status, 0) + 1
+            conn.execute("""update public.source_documents d set
+                processing_status=case when v.status='pending' then d.processing_status else v.status end,
+                prefilter_amount=v.amount,
+                classification=case when v.status='pending' then d.classification
+                    else jsonb_build_object('rule','pre_filtro_lote','max_amount',v.amount) end,
+                updated_at=now()
+                from unnest(%s::uuid[], %s::text[], %s::numeric[]) as v(id,status,amount)
+                where d.id=v.id""", (ids, statuses, amounts))
+            conn.commit()
+            if len(rows) < batch_size:
+                break
+    return totals
+
+
 def claim_document() -> dict | None:
     with connect() as conn:
         return conn.execute("""with candidate as (
@@ -301,7 +340,7 @@ def datajud_signal(cnj: str | None) -> dict | None:
     if not cnj:
         return None
     with connect() as conn:
-        return conn.execute("""select tribunal_alias,published_at from public.source_documents
+        return conn.execute("""select tribunal_alias,published_at,raw_data from public.source_documents
             where source='datajud' and process_number=%s order by published_at desc nulls last limit 1""", (cnj,)).fetchone()
 
 

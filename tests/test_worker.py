@@ -50,7 +50,7 @@ def test_status_distinguishes_backlog():
 
 def test_alert_does_not_mislabel_gross_as_net():
     msg = worker.format_alert({"amount": 135654.57, "potential_score": 0.9, "alias": "api_publica_trf1", "classification": {"amount_basis": "principal"}})
-    assert "Principal" in msg
+    assert "(principal)" in msg
     assert "Líquido" not in msg
     assert "não retorno garantido" in msg
 
@@ -265,3 +265,21 @@ def test_pending_alerts_are_ranked_by_expected_value(test_db):
     assert [float(o["amount"]) for o in ranked] == [900000.0, 150000.0]
     archived = storage.archive_unselected([ranked[0]["id"]], datetime.now(timezone.utc))
     assert archived == 1 and len(storage.pending_alerts(3)) == 1
+
+
+def test_backfill_prefilter_triages_old_queue_in_bulk(test_db):
+    rows = [
+        {"id": "sem-valor", "siglaTribunal": "TJSP", "texto": "Expeça-se ofício requisitório."},
+        {"id": "baixo", "siglaTribunal": "TJSP", "texto": "Expeça-se ofício requisitório de R$ 5.000,00"},
+        {"id": "alto", "siglaTribunal": "TJSP", "texto": "Expeça-se ofício requisitório de R$ 450.000,00"},
+    ]
+    for row in rows:
+        storage.upsert_document(row)
+    with storage.connect() as conn:  # simula itens gravados antes do pré-filtro existir
+        conn.execute("update public.source_documents set processing_status='pending', prefilter_amount=null")
+    totals = storage.backfill_prefilter(batch_size=2)
+    assert totals == {"needs_enrichment": 1, "below_minimum": 1, "pending": 1}
+    counts = storage.queue_counts()
+    assert counts["pending"] == 1 and counts["needs_enrichment"] == 1 and counts["below_minimum"] == 1
+    assert storage.backfill_prefilter() == {}
+    assert float(storage.claim_document()["prefilter_amount"]) == 450000.0

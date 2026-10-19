@@ -87,27 +87,84 @@ def brl(amount) -> str:
     return f"R$ {float(amount):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def format_alert(opp: dict) -> str:
+def rank_score(opp: dict) -> float:
+    """Valor esperado do crédito para a ASPIN, usado para escolher as 3 melhores.
+
+    valor × confiança, com ajustes do que o ofício mostra: natureza alimentar e
+    preferência legal (pagos antes) sobem; FIDC/banco/cessionário como terceiro
+    interessado (crédito possivelmente já cedido) desce bastante.
+    """
     result = opp.get("classification") or {}
-    basis = {"principal": "Principal", "bruto": "Bruto", "liquido": "Líquido", "nao_informado": "Base não informada"}.get(result.get("amount_basis"), "Base não informada")
+    score = float(opp.get("amount") or 0) * float(opp.get("potential_score") or 0)
+    if result.get("credit_nature") == "alimentar":
+        score *= 1.10
+    if result.get("legal_preference"):
+        score *= 1.15
+    if opp.get("datajud_signal"):
+        score *= 1.05
+    if result.get("third_party_interest"):
+        score *= 0.40
+    return score
+
+
+def _v(value, default="não informado") -> str:
+    text = str(value or "").strip()
+    return text if text else default
+
+
+def format_alert(opp: dict, position: int | None = None, total: int | None = None, slot: datetime | None = None) -> str:
+    """Alerta no formato do cabeçalho do PJe/ofício requisitório (modelo enviado pela cliente)."""
+    result = opp.get("classification") or {}
+    signal = opp.get("datajud_signal") or {}
+    meta = signal.get("raw_data", {}).get("metadata", {}) if isinstance(signal.get("raw_data"), dict) else {}
     tribunal = str(opp.get("alias") or "não informado").removeprefix("api_publica_").upper()
     url = opp.get("document_url") or opp.get("source_url") or "Link não fornecido pela fonte"
-    return (
-        "ASPIN | Candidato judicial identificado\n\n"
-        f"Tribunal: {tribunal}\n"
-        f"Tipo: {opp.get('requisition_type') or 'não informado'}\n"
-        f"Valor citado ({basis}): {brl(opp['amount'])}\n"
-        f"Comissão estimada ASPIN ({settings.aspin_commission_rate:.0%}): {brl(float(opp['amount']) * settings.aspin_commission_rate)}\n"
-        f"Beneficiário: {opp.get('beneficiary') or 'não informado'}\n"
-        f"Devedor: {opp.get('debtor_entity') or 'não informado'}\n"
-        f"Processo: {opp.get('cnj_number') or 'não informado'}\n"
-        f"Confiança da classificação: {float(opp['potential_score']):.0%}\n"
-        f"{_datajud_line(opp)}\n\n"
-        f"Motivo: {str(result.get('reason') or '')[:400]}\n\n"
-        f"Evidência: {str(opp.get('text_excerpt') or '')[:700]}\n\n"
-        f"Fonte: {str(url)[:600]}\n\n"
-        "Revisão comercial e jurídica necessária: confirmar situação atual, titularidade e disponibilidade. Comissão é estimativa, não retorno garantido."
-    )[:4000]
+    basis = {"principal": "principal", "bruto": "bruto", "liquido": "líquido"}.get(result.get("amount_basis"), "base não informada")
+    tipo = {"oficio_requisitorio": "Ofício requisitório", "precatorio": "Precatório", "rpv": "RPV"}.get(
+        opp.get("requisition_type"), _v(opp.get("requisition_type")))
+    natureza = {"alimentar": "Alimentar", "comum": "Comum"}.get(result.get("credit_nature"), "não informada")
+    header = "ASPIN | Oportunidade"
+    if position and total:
+        header += f" {position} de {total}"
+    if slot:
+        header += f" — entrega das {slot:%H}h ({slot:%d/%m})"
+    amount = float(opp["amount"])
+    lines = [
+        header,
+        "",
+        f"Número: {_v(opp.get('cnj_number'))}",
+        f"Classe: {_v(result.get('process_class') or meta.get('classe'))}",
+        f"Órgão julgador: {_v(result.get('court_body') or meta.get('orgao'))}",
+        f"Tribunal: {tribunal}",
+        f"Valor requisitado ({basis}): {brl(amount)}",
+        f"Processo referência: {_v(result.get('reference_process'))}",
+        f"Assunto: {_v(result.get('subject'))}",
+        "",
+        f"Requisição: {tipo}" + (f" nº {result['requisition_number']}" if result.get("requisition_number") else ""),
+        f"Natureza do crédito: {natureza}",
+        f"Preferência legal: {_v(result.get('legal_preference'), 'não informada')}",
+        f"Credor: {_v(opp.get('beneficiary'))}",
+        f"Devedor: {_v(opp.get('debtor_entity'))}",
+    ]
+    if result.get("contractual_fees_amount"):
+        lines.append(f"Honorários contratuais destacados: {brl(result['contractual_fees_amount'])}")
+    if result.get("res_judicata_date"):
+        lines.append(f"Trânsito em julgado: {result['res_judicata_date']}")
+    lines.append("Terceiro interessado (FIDC/banco/cessionário): " +
+                 ("SIM — verificar se o crédito já foi cedido" if result.get("third_party_interest") else "não citado"))
+    lines.append(_datajud_line(opp))
+    lines += [
+        "",
+        f"Confiança da classificação: {float(opp['potential_score']):.0%}",
+        f"Comissão estimada ASPIN ({settings.aspin_commission_rate:.0%}): {brl(amount * settings.aspin_commission_rate)}",
+        "",
+        f"Motivo: {str(result.get('reason') or '')[:350]}",
+        f"Evidência: {str(opp.get('text_excerpt') or result.get('evidence_quote') or '')[:500]}",
+        f"Fonte: {str(url)[:500]}",
+        "",
+        "Revisão comercial e jurídica necessária: confirmar situação atual, titularidade, cessões e disponibilidade. Comissão é estimativa, não retorno garantido.",
+    ]
+    return "\n".join(lines)[:4000]
 
 
 def _datajud_line(opp: dict) -> str:
@@ -185,6 +242,8 @@ async def _collect_datajud(metrics: dict, errors: list[str]):
             metrics.setdefault("datajud_not_reached", []).append(alias)  # fica para o próximo ciclo
             metrics["datajud_backlog"] = True
             continue
+        if metrics["tribunals"]:
+            await asyncio.sleep(settings.datajud_request_delay)  # espaça tribunais (limite 429 do CNJ)
         metrics["tribunals"] += 1
         key = "datajud_cursor:" + alias
         try:
@@ -351,14 +410,26 @@ async def _deliver_digest(metrics: dict, errors: list[str], now: datetime | None
     # Progresso do horário: se o envio caiu no meio, a nova tentativa manda só o que falta.
     progress = storage.get_state("digest_progress")
     sent_ids = list(progress.get("sent_ids", [])) if progress.get("slot") == key else []
-    best = storage.pending_alerts(max(0, settings.digest_top_n - len(sent_ids))) if len(sent_ids) < settings.digest_top_n else []
+    remaining = max(0, settings.digest_top_n - len(sent_ids))
+    best = []
+    if remaining:
+        # Avalia uma amostra ampla (já ordenada por valor × confiança no banco) e
+        # reordena com os campos do ofício: natureza, preferência, cessão.
+        pool = storage.pending_alerts(settings.digest_pool_size)
+        for opp in pool:
+            try:
+                opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+            except Exception:
+                opp["datajud_signal"] = None
+        best = sorted(pool, key=rank_score, reverse=True)[:remaining]
+    metrics["digest_slot"] = slot
     if not best and not sent_ids:
         if simulated("telegram"):
             raise RuntimeError("Telegram: falha simulada")
         await send_alert(digest_message_empty(slot, metrics))
     elif best:
         before = metrics.get("alerts", 0)
-        await _send_pending_alerts(metrics, errors, best)
+        await _send_pending_alerts(metrics, errors, best, slot, len(sent_ids))
         sent_ids += [str(o["id"]) for o in best[:metrics.get("alerts", 0) - before]]
         if metrics.get("alerts_failed"):
             storage.set_state("digest_progress", {"slot": key, "sent_ids": sent_ids})
@@ -372,18 +443,21 @@ async def _deliver_digest(metrics: dict, errors: list[str], now: datetime | None
     metrics["digest_archived"] = archived
 
 
-async def _send_pending_alerts(metrics: dict, errors: list[str], opportunities: list[dict] | None = None):
+async def _send_pending_alerts(metrics: dict, errors: list[str], opportunities: list[dict] | None = None,
+                               slot: datetime | None = None, already_sent: int = 0):
     if opportunities is None:
         opportunities = storage.pending_alerts(settings.max_classify_per_cycle)
-    for opp in opportunities:
+    for index, opp in enumerate(opportunities, start=already_sent + 1):
         try:
             if simulated("telegram"):
                 raise RuntimeError("Telegram: falha simulada")
-            try:
-                opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
-            except Exception:
-                opp["datajud_signal"] = None
-            await send_alert(format_alert(opp))
+            if "datajud_signal" not in opp:
+                try:
+                    opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+                except Exception:
+                    opp["datajud_signal"] = None
+            total = settings.digest_top_n if slot else None
+            await send_alert(format_alert(opp, index if slot else None, total, slot))
             storage.mark_alerted(opp["id"])
             metrics["alerts"] += 1
         except Exception as exc:
@@ -458,6 +532,12 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
                 probes = await probe_tjsp_pages()
                 metrics["tjsp_probe_available"] = len(probes)
             with timed(metrics, "ia"):
+                try:
+                    triaged = storage.backfill_prefilter(time_budget=settings.backfill_time_budget_seconds)
+                    if triaged:
+                        metrics["prefilter_backfill"] = triaged
+                except Exception as exc:
+                    log.warning("Triagem em lote adiada: %s", storage.safe_error(exc))
                 await _process_queue(metrics, errors)
             with timed(metrics, "telegram"):
                 try:

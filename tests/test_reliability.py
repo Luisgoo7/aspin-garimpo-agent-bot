@@ -568,3 +568,58 @@ async def test_datajud_time_budget_rotates_tribunals(monkeypatch):
     seen.clear()
     await worker._collect_datajud({"tribunals": 0, "datajud_documents": 0, "datajud_pages": 0, "datajud_ok": 0, "datajud_failed": []}, [])
     assert seen == ["api_publica_trf3"]
+
+
+# ---------- modelo do alerta (cabeçalho PJe / ofício requisitório) ----------
+
+def oficio_opp(**extra):
+    classification = {"amount_basis": "principal", "process_class": "CUMPRIMENTO DE SENTENÇA CONTRA A FAZENDA PÚBLICA",
+                      "court_body": "1ª Vara Federal Cível (exemplo)", "reference_process": "0000000-00.2014.4.01.3400",
+                      "subject": "Exemplo de assunto", "requisition_number": "2025.0000.000.000001",
+                      "credit_nature": "alimentar", "legal_preference": "Idosos a partir de 60 anos",
+                      "contractual_fees_amount": 50000.0, "res_judicata_date": "25/04/2024",
+                      "third_party_interest": False, "reason": "Requisição expedida com valor"}
+    opp = {"id": "x", "amount": 300000.0, "potential_score": 0.9, "alias": "api_publica_trf1",
+           "requisition_type": "precatorio", "cnj_number": "0000000-00.2024.4.01.3400",
+           "beneficiary": "Credor Exemplo", "debtor_entity": "União Federal",
+           "document_url": "https://exemplo.invalid/doc", "classification": classification}
+    opp.update(extra)
+    return opp
+
+
+def test_alert_follows_pje_header_model():
+    slot = datetime(2026, 10, 19, 12, 0)
+    msg = worker.format_alert(oficio_opp(), 1, 3, slot)
+    lines = msg.splitlines()
+    assert lines[0] == "ASPIN | Oportunidade 1 de 3 — entrega das 12h (19/10)"
+    for expected in ("Número: 0000000-00.2024.4.01.3400", "Classe: CUMPRIMENTO DE SENTENÇA CONTRA A FAZENDA PÚBLICA",
+                     "Órgão julgador:", "Valor requisitado (principal): R$ 300.000,00", "Processo referência:",
+                     "Requisição: Precatório nº 2025.0000.000.000001", "Natureza do crédito: Alimentar",
+                     "Preferência legal: Idosos a partir de 60 anos", "Devedor: União Federal",
+                     "Honorários contratuais destacados: R$ 50.000,00", "Trânsito em julgado: 25/04/2024",
+                     "Terceiro interessado (FIDC/banco/cessionário): não citado"):
+        assert expected in msg, expected
+    assert len(msg) <= 4000
+
+
+def test_ranking_prefers_preference_and_penalizes_possible_cession():
+    base = oficio_opp()
+    ceded = oficio_opp(id="c", amount=500000.0, classification=dict(base["classification"], third_party_interest=True))
+    common = oficio_opp(id="m", classification=dict(base["classification"], credit_nature="comum", legal_preference=None))
+    ranked = sorted([ceded, common, base], key=worker.rank_score, reverse=True)
+    assert [o["id"] for o in ranked] == ["x", "m", "c"]
+    assert "SIM — verificar se o crédito já foi cedido" in worker.format_alert(ceded)
+
+
+def test_llm_normalizes_oficio_fields():
+    from app.llm import LLMClassifier
+    text = ("Requisição de Pagamento nº 2025.0000.000.000001. Natureza do Crédito: Alimentar. "
+            "Valor Total do Beneficiário: R$ 300.000,00. Preferência legal: Idosos a partir de 60 anos.")
+    raw = {"is_opportunity": True, "potential_score": 90, "reason": "ok", "requisition_type": "precatorio",
+           "evidence_quote": "Valor Total do Beneficiário: R$ 300.000,00", "amount": "300.000,00",
+           "amount_basis": "principal", "requisition_number": "2025.0000.000.000001",
+           "credit_nature": "Alimentar", "legal_preference": "Idosos a partir de 60 anos",
+           "contractual_fees_amount": None, "third_party_interest": "false"}
+    result = LLMClassifier()._normalize(raw, text)
+    assert result["credit_nature"] == "alimentar" and result["requisition_number"] == "2025.0000.000.000001"
+    assert result["third_party_interest"] is False and result["potential_score"] == 0.9

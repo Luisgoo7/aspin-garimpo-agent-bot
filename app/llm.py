@@ -63,8 +63,27 @@ Responda somente JSON válido, sem markdown, no formato:
   "deadline_at": string|null,
   "potential_score": number,
   "reason": string,
-  "evidence_quote": string
+  "evidence_quote": string,
+  "requisition_number": string|null,
+  "process_class": string|null,
+  "court_body": string|null,
+  "reference_process": string|null,
+  "subject": string|null,
+  "credit_nature": "alimentar|comum|nao_informado",
+  "legal_preference": string|null,
+  "contractual_fees_amount": number|null,
+  "res_judicata_date": string|null,
+  "third_party_interest": boolean
 }
+Campos do ofício (todos opcionais, só se estiverem LITERALMENTE no texto; senão null):
+requisition_number = número da requisição (ex.: 2025.3400.014.002524); process_class = classe
+(ex.: Cumprimento de sentença contra a Fazenda Pública); court_body = órgão julgador/vara;
+reference_process = processo de referência/ação originária; subject = assunto/natureza da
+obrigação; credit_nature = alimentar quando o texto disser natureza alimentar, comum quando disser
+comum; legal_preference = preferência legal (idoso, doença grave, deficiência);
+contractual_fees_amount = honorários contratuais destacados; res_judicata_date = data do trânsito
+em julgado; third_party_interest = true se houver FIDC, fundo, banco, cessionário ou cessão de
+crédito citados como terceiro interessado (indica possível cessão já feita).
 potential_score deve ser um número finito entre 0 e 1; se usar percentual, informe 0 a 100.
 O evidence_quote deve ser uma cópia curta, literal, CONTÍNUA e decisiva do texto, sem reticências,
 sem juntar frases distantes e sem paráfrase. O reason deve estar em
@@ -467,6 +486,14 @@ class LLMClassifier:
         normalized["amount_basis"] = _normalize_amount_basis(result.get("amount_basis"))
         normalized["reason"] = _limpar_texto(result.get("reason"))
         normalized["evidence_quote"] = _limpar_texto(result.get("evidence_quote"))
+        for campo in ("requisition_number", "process_class", "court_body", "reference_process",
+                      "subject", "legal_preference", "res_judicata_date"):
+            valor = _limpar_texto(result.get(campo)) if result.get(campo) not in (None, "", "null") else None
+            normalized[campo] = valor[:200] if valor else None
+        natureza = _sem_acentos(result.get("credit_nature") or "").casefold()
+        normalized["credit_nature"] = "alimentar" if "aliment" in natureza else "comum" if "comum" in natureza else "nao_informado"
+        normalized["contractual_fees_amount"] = _normalize_amount(result.get("contractual_fees_amount"))
+        normalized["third_party_interest"] = _strict_bool(result.get("third_party_interest"))
 
         if source_text is not None:
             normalized["evidence_quote"] = _repair_evidence_quote(normalized["evidence_quote"], source_text)

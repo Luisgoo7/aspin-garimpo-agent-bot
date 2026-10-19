@@ -142,6 +142,8 @@ async def collect_expeditions(alias: str, cursor: dict, client: DataJudClient | 
     cutoff = expedition_cutoff()
     async with httpx.AsyncClient(timeout=settings.datajud_timeout_seconds) as http:
         while pages < settings.datajud_max_pages:
+            if pages:
+                await asyncio.sleep(settings.datajud_request_delay)  # respeita o limite da API pública
             data = await client.search(alias, build_expedition_query(after, since, settings.datajud_page_size), http)
             hits_data = data.get("hits") or {}
             hits = hits_data.get("hits") or []

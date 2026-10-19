@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     datajud_time_budget_seconds: int = Field(default=300, ge=30, le=3600)
     datajud_timeout_seconds: float = Field(default=60, ge=5, le=300)
     max_claims_per_cycle: int = Field(default=2000, ge=1, le=100000)
+    backfill_time_budget_seconds: float = Field(default=120, ge=5, le=1800)
+    datajud_request_delay: float = Field(default=1.5, ge=0, le=30)
     datajud_initial_lookback_days: int = Field(default=30, ge=1, le=120)
     datajud_max_expedition_age_days: int = Field(default=180, ge=7, le=3650)
     djen_tribunals: str = ""
@@ -51,6 +53,7 @@ class Settings(BaseSettings):
     digest_hours: str = "8,12,18"
     digest_timezone: str = "America/Sao_Paulo"
     digest_top_n: int = Field(default=3, ge=1, le=20)
+    digest_pool_size: int = Field(default=50, ge=1, le=1000)
     failure_streak_to_alert: int = Field(default=3, ge=1, le=48)
     digest_max_delay_minutes: int = Field(default=180, ge=10, le=720)
     initial_lookback_days: int = Field(default=7, ge=1, le=30)
