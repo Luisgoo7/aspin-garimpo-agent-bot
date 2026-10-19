@@ -1,4 +1,7 @@
 /**
+ * @OnlyCurrentDoc  Limita a permissão a ESTA planilha (não acessa outras planilhas do Drive).
+ */
+/**
  * ASPIN Garimpo — recebe as oportunidades APROVADAS no Telegram e grava na planilha.
  *
  * Instalação (uma vez): na planilha, Extensões > Apps Script > apague o conteúdo,
