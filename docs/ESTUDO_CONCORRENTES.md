@@ -48,6 +48,42 @@ partir do que a página diz, não informação confirmada pela empresa.
 | 9 | Fila de trabalho/pipeline (status do lead, consultor) | PREC, Guia Precatório | Tabela `opportunities.status` já existe; faltam telas | Fora do bot |
 | 10 | Enriquecimento de contato do credor | JUDIT, JURISCAN | Só com base legal LGPD e fornecedor licenciado | Não recomendado agora |
 
+## Material enviado pela cliente (19/10/2026)
+
+**Ofício requisitório de exemplo (TRF1, PJe).** Mostra como o crédito é registrado e
+quais campos qualificam o lead. O bot passou a pedir esses campos à IA e a exibi-los
+no alerta do Telegram, no mesmo formato do cabeçalho do PJe:
+
+- Número do processo, classe ("Cumprimento de sentença contra a Fazenda Pública"),
+  órgão julgador, valor da causa, processo referência, assunto;
+- nº da requisição de pagamento e tipo (precatório/RPV), espécie;
+- devedor (ex.: União Federal), credor, advogado;
+- **natureza do crédito** (alimentar x comum) e **preferência legal** (idoso 60+,
+  doença grave) — ambos aceleram o pagamento e entram no ranking;
+- valor total do beneficiário, principal, juros, **honorários contratuais destacados**;
+- datas: trânsito em julgado, data base, decurso de prazo;
+- **terceiros interessados** — no exemplo aparecem um banco e um FIDC, sinal de que
+  parte do crédito pode já ter sido cedida. O ranking rebaixa esses casos e o
+  alerta pede verificação de cessão.
+
+**Guia Precatório — página para consultores** (guiaprecatorio.com/lp-consultores):
+leads acima de R$ 80 mil, teto de 50/mês por consultor, "+300 casos novos por mês",
+crédito mediano de R$ 125 mil (números da própria página, 03/09/2026). O lead traz
+valor bruto, valor líquido (descontando honorários e IR), % de honorários, ente
+devedor e intenção do credor. A captação é inbound (o credor procura a plataforma),
+não garimpo processual. Ideia aproveitável: mostrar no alerta o **líquido estimado**
+para o credor quando o texto trouxer os honorários.
+
+**JUDIT Miner** — já analisado acima (base de precatórios por LOA + pré-precatórios).
+
+**Mercatório** (facebook.com/mercatorio e mercatorio.com.br, Belo Horizonte/MG) —
+marketplace de precatórios com dois lados: investidores compram precatórios com
+deságio pela plataforma (o site fala em "retorno médio de 20% ao ano", correção
+IPCA-E/Selic, e avisa que não é oferta regulada pela CVM) e credores pedem proposta
+de venda ("Vender Precatório"). Também vende "Dados e Soluções" e diz ter "a maior
+base de precatórios do país". Para a ASPIN é ao mesmo tempo concorrente na
+originação e possível canal comprador para os créditos que o bot encontrar.
+
 ## TJSP / eSAJ
 
 As publicações do TJSP **já chegam pelo DJEN** (ex.: em 16/10/2026 o DJEN
