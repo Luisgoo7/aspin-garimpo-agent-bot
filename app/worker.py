@@ -959,6 +959,19 @@ async def redispatch_daemon() -> bool:
     return response is not None and response.status_code < 300
 
 
+async def _deliver_digest_now(totals: dict) -> None:
+    """Se um horário de entrega venceu e ainda não foi entregue, entrega agora."""
+    slot = digest_slot_due(datetime.now(timezone.utc))
+    if slot is None or storage.get_state("last_digest").get("slot") == slot.isoformat():
+        return
+    metrics = {"alerts": 0}
+    errors: list[str] = []
+    await _deliver_digest(metrics, errors)
+    totals["digests"] = totals.get("digests", 0) + (1 if metrics.get("digest") == "entregue" else 0)
+    if errors:
+        raise RuntimeError("; ".join(errors)[:200])
+
+
 async def _daemon_cycle(reason: str) -> dict | None:
     log.info("Robô: iniciando coleta (%s)", reason)
     try:
@@ -988,6 +1001,14 @@ async def run_daemon(max_minutes: float) -> dict:
         if cycle is not None and cycle.done():
             totals["cycles"] += 1
             cycle = None
+        if cycle is None:
+            # Entrega das 08/12/18h na hora exata, com o que já foi classificado; não espera
+            # um ciclo de coleta terminar. (Com ciclo rodando, o próprio ciclo entrega ao final.)
+            try:
+                await _deliver_digest_now(totals)
+            except Exception as exc:
+                totals["errors"] += 1
+                log.warning("Robô: entrega adiada: %s", storage.safe_error(exc))
         if cycle is None and not yielding and now < deadline - settings.cycle_timeout_seconds:
             try:
                 reason = collector_dispatch_reason()
