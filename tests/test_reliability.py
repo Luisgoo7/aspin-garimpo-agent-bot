@@ -333,3 +333,9 @@ def test_placeholder_and_unknown_host_are_reported_without_host(monkeypatch):
     assert dbcheck.diagnose("postgresql://postgres:[YOUR-PASSWORD]@db.abcdefghijklmnopqrst.supabase.co:5432/postgres")["categoria"] == "placeholder_na_uri"
     text = dbcheck.format_diagnosis(dbcheck.diagnose(f"postgresql://u:{SECRET}@meu-servidor-secreto.exemplo.com:5432/postgres"))
     assert "host=(oculto).exemplo.com" in text and "meu-servidor-secreto" not in text and SECRET not in text
+
+
+def test_database_url_whitespace_is_removed():
+    from app.config import Settings
+    config = Settings(_env_file=None, database_url=" postgresql://u:p@aws-0-sa-east-1.pooler.\n supabase.com:5432/postgres \n")
+    assert config.database_url == "postgresql://u:p@aws-0-sa-east-1.pooler.supabase.com:5432/postgres"

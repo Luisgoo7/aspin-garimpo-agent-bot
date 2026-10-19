@@ -1,4 +1,6 @@
-from pydantic import Field
+import re
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,6 +10,9 @@ DEFAULT_DATAJUD_TRIBUNALS = ",".join((
     "api_publica_trf4", "api_publica_trf5", "api_publica_trf6", "api_publica_tjrj",
     "api_publica_tjmg",
 ))
+
+
+DATABASE_URL_NORMALIZED = [False]
 
 
 class Settings(BaseSettings):
@@ -52,6 +57,17 @@ class Settings(BaseSettings):
     max_processing_attempts: int = Field(default=5, ge=1, le=20)
     cycle_timeout_seconds: int = Field(default=1500, ge=60, le=7200)
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _strip_whitespace_inside_uri(cls, value):
+        # Espaço/quebra de linha nunca é válido dentro de uma URI PostgreSQL (seria %20).
+        # Acontece ao colar a URI quebrada em várias linhas no secret.
+        text = str(value or "")
+        cleaned = re.sub(r"\s+", "", text)
+        if cleaned != text.strip():
+            DATABASE_URL_NORMALIZED[0] = True
+        return cleaned
 
     def configuration_errors(self) -> list[str]:
         errors = []

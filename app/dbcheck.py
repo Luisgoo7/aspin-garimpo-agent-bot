@@ -127,7 +127,10 @@ def classify_error(exc: BaseException) -> tuple[str, str]:
 
 
 def diagnose(dsn: str, exc: BaseException | None = None) -> dict:
+    from .config import DATABASE_URL_NORMALIZED
     target = describe_target(dsn)
+    if DATABASE_URL_NORMALIZED[0]:
+        target["espacos_removidos_da_uri"] = True
     result = {"alvo": target}
     if exc is not None:
         category, hint = classify_error(exc)
@@ -165,7 +168,7 @@ def format_diagnosis(diag: dict) -> str:
     target = diag.get("alvo", {})
     keys = ("configurada", "formato", "esquema_ok", "tipo_host", "host", "porta", "pooler_modo",
             "usuario_com_ref", "tem_senha", "banco", "dns", "ipv4", "ipv6",
-            "senha_com_caractere_reservado", "contem_placeholder", "contem_espaco")
+            "senha_com_caractere_reservado", "contem_placeholder", "contem_espaco", "espacos_removidos_da_uri")
     alvo = ", ".join(f"{k}={target[k]}" for k in keys if k in target)
     text = f"Banco: {alvo}"
     if diag.get("categoria"):
