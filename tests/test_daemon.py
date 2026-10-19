@@ -33,6 +33,7 @@ def daemon_env(monkeypatch):
     monkeypatch.setattr(worker, "process_buttons", poll)
     monkeypatch.setattr(worker, "redispatch_daemon", AsyncMock(return_value=True))
     monkeypatch.setattr(worker, "queued_runs", AsyncMock(return_value=[]))
+    monkeypatch.setattr(worker, "_deliver_digest_now", AsyncMock())
     return clock, polls
 
 
@@ -106,3 +107,35 @@ async def test_long_polling_passes_timeout_to_telegram(monkeypatch):
     monkeypatch.setattr(telegram_bot, "_call", call)
     await telegram_bot.get_updates(5, poll_seconds=25)
     assert seen["payload"]["timeout"] == 25 and seen["timeout"] > 25 and seen["payload"]["offset"] == 5
+
+
+
+@pytest.mark.asyncio
+async def test_daemon_delivers_on_the_hour_without_waiting_for_a_cycle(monkeypatch, daemon_env):
+    clock, polls = daemon_env
+    monkeypatch.setattr(worker, "collector_dispatch_reason", lambda: None)
+    deliver = AsyncMock()
+    monkeypatch.setattr(worker, "_deliver_digest_now", deliver)
+    await worker.run_daemon(max_minutes=3)
+    assert deliver.await_count >= 1  # checado a cada volta do laço (~30 s)
+
+
+@pytest.mark.asyncio
+async def test_deliver_now_only_when_slot_is_due_and_pending(monkeypatch):
+    from datetime import datetime, timezone
+    from app import storage
+    state = {}
+    monkeypatch.setattr(storage, "get_state", lambda key: state.get(key, {}))
+    deliver = AsyncMock(side_effect=lambda metrics, errors: metrics.update(digest="entregue"))
+    monkeypatch.setattr(worker, "_deliver_digest", deliver)
+    monkeypatch.setattr(worker, "digest_slot_due", lambda now: None)
+    totals = {}
+    await worker._deliver_digest_now(totals)
+    deliver.assert_not_awaited()
+    slot = datetime(2026, 10, 20, 8, tzinfo=timezone.utc)
+    monkeypatch.setattr(worker, "digest_slot_due", lambda now: slot)
+    await worker._deliver_digest_now(totals)
+    assert deliver.await_count == 1 and totals["digests"] == 1
+    state["last_digest"] = {"slot": slot.isoformat()}
+    await worker._deliver_digest_now(totals)
+    assert deliver.await_count == 1
