@@ -623,3 +623,15 @@ def test_llm_normalizes_oficio_fields():
     result = LLMClassifier()._normalize(raw, text)
     assert result["credit_nature"] == "alimentar" and result["requisition_number"] == "2025.0000.000.000001"
     assert result["third_party_interest"] is False and result["potential_score"] == 0.9
+
+
+def test_focus_excerpt_keeps_the_largest_amount_inside_the_window():
+    from app.opportunity import focus_excerpt
+    text = "intimação " * 2000 + "Expeça-se ofício requisitório de R$ 750.000,00 em favor do credor. " + "fim " * 2000
+    excerpt = focus_excerpt(text, 6000)
+    assert len(excerpt) == 6000 and "R$ 750.000,00" in excerpt
+    assert focus_excerpt("curto R$ 1,00") == "curto R$ 1,00"
+
+
+def test_json_metrics_tolerate_datetimes():
+    assert '"2026-10-19 12:00:00"' in storage._dumps({"slot": datetime(2026, 10, 19, 12)})

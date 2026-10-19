@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from .config import settings
 from .datajud import DataJudError, collect_expeditions
 from .llm import LLMClassifier, _AMOUNT_CONTEXT_RE, _normalize_amount
-from .opportunity import KEYWORDS, max_amount_in_text, canonical_alias, canonical_cnj, clean_text, parse_amount
+from .opportunity import KEYWORDS, focus_excerpt, max_amount_in_text, canonical_alias, canonical_cnj, clean_text, parse_amount
 from .sources import search_djen, probe_tjsp_pages
 from .telegram_bot import send_alert
 from .source_retry import recover_queries
@@ -305,7 +305,7 @@ async def _process_queue(metrics: dict, errors: list[str]):
             if simulated("ia"):
                 result = {"error": True, "reason": "falha simulada da IA"}
             else:
-                result = await classifier.classify(text[:18000])
+                result = await classifier.classify(focus_excerpt(text, settings.ai_max_chars))
             ai_calls += 1
             metrics["classified"] += 1
             if result.get("error"):
@@ -422,7 +422,7 @@ async def _deliver_digest(metrics: dict, errors: list[str], now: datetime | None
             except Exception:
                 opp["datajud_signal"] = None
         best = sorted(pool, key=rank_score, reverse=True)[:remaining]
-    metrics["digest_slot"] = slot
+    metrics["digest_slot"] = slot.isoformat()
     if not best and not sent_ids:
         if simulated("telegram"):
             raise RuntimeError("Telegram: falha simulada")

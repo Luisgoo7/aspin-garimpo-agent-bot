@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     digest_timezone: str = "America/Sao_Paulo"
     digest_top_n: int = Field(default=3, ge=1, le=20)
     digest_pool_size: int = Field(default=50, ge=1, le=1000)
+    ai_max_chars: int = Field(default=6000, ge=1000, le=30000)
     failure_streak_to_alert: int = Field(default=3, ge=1, le=48)
     digest_max_delay_minutes: int = Field(default=180, ge=10, le=720)
     initial_lookback_days: int = Field(default=7, ge=1, le=30)

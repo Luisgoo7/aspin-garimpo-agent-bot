@@ -9,13 +9,22 @@ from pathlib import Path
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
+from psycopg.types.json import Jsonb as _Jsonb
 
 from .config import settings
 from .dbcheck import diagnose, format_diagnosis, repair_pooler_dsn
 from .opportunity import canonical_alias, canonical_cnj, clean_text, keyword_score, max_amount_in_text
 
 LOCK_ID = 418739261
+
+
+def _dumps(value) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def Jsonb(value):
+    """JSONB tolerante a datetime/Decimal: métrica com tipo inesperado não derruba o ciclo."""
+    return _Jsonb(value, dumps=_dumps)
 APP_NAME = "aspin-garimpo-" + ("actions" if os.environ.get("GITHUB_ACTIONS") else "worker")
 MIGRATIONS = ("001_initial_schema.sql", "002_sources_and_runs.sql", "003_reliable_processing.sql", "004_prefilter_and_signals.sql")
 
