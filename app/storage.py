@@ -278,7 +278,8 @@ def queue_counts() -> dict:
 def save_opportunity(doc: dict, result: dict) -> tuple[str, bool]:
     alias = canonical_alias(doc["tribunal_alias"])
     cnj = canonical_cnj(doc["process_number"] or "") or "documento-" + str(doc["id"])
-    rtype = result["requisition_type"]
+    rtype = result.get("requisition_type") or "outro"
+    quote = (result.get("evidence_quote") or clean_text(doc.get("text_excerpt") or "")[:500] or "(sem trecho)")
     with connect() as conn:
         old = conn.execute("""select o.* from public.opportunities o join public.processes p on p.id=o.process_id
             join public.tribunals t on t.id=p.tribunal_id where t.alias=any(%s)
@@ -288,7 +289,7 @@ def save_opportunity(doc: dict, result: dict) -> tuple[str, bool]:
         if old:
             if old["alerted_at"] is None and (old["amount"] is None or float(old["amount"]) < settings.min_opportunity_amount or result["potential_score"] >= float(old["potential_score"] or 0)):
                 evidence = conn.execute("""insert into public.evidence(process_id,evidence_type,text_excerpt,document_url,sha256,source_payload)
-                    values(%s,%s,%s,%s,%s,%s) returning id""", (old["process_id"], rtype, result["evidence_quote"], doc["document_url"], doc["content_hash"], Jsonb(doc.get("raw_data") or {}))).fetchone()["id"]
+                    values(%s,%s,%s,%s,%s,%s) returning id""", (old["process_id"], rtype, quote, doc["document_url"], doc["content_hash"], Jsonb(doc.get("raw_data") or {}))).fetchone()["id"]
                 conn.execute("""update public.opportunities set evidence_id=%s,amount=%s,potential_score=%s,classification=%s,
                     beneficiary=%s,debtor_entity=%s,lawyer=%s,status=%s where id=%s""", (evidence, result["amount"], result["potential_score"], Jsonb(result), result.get("beneficiary"), result.get("debtor_entity"), result.get("lawyer"), "new" if result["potential_score"] >= settings.min_confidence else "review", old["id"]))
             return old["id"], False
@@ -301,7 +302,7 @@ def save_opportunity(doc: dict, result: dict) -> tuple[str, bool]:
             returning id""", (tribunal, cnj, doc["document_url"], Jsonb(source))).fetchone()["id"]
         evidence = conn.execute("""insert into public.evidence(process_id,evidence_type,text_excerpt,document_url,sha256,source_payload)
             values(%s,%s,%s,%s,%s,%s) returning id""",
-            (process, rtype, result["evidence_quote"], doc["document_url"], doc["content_hash"], Jsonb(source))).fetchone()["id"]
+            (process, rtype, quote, doc["document_url"], doc["content_hash"], Jsonb(source))).fetchone()["id"]
         opp = conn.execute("""insert into public.opportunities(process_id,evidence_id,status,requisition_type,amount,
             beneficiary,debtor_entity,lawyer,potential_score,classification)
             values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id""",

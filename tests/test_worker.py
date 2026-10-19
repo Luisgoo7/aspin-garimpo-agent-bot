@@ -283,3 +283,11 @@ def test_backfill_prefilter_triages_old_queue_in_bulk(test_db):
     assert counts["pending"] == 1 and counts["needs_enrichment"] == 1 and counts["below_minimum"] == 1
     assert storage.backfill_prefilter() == {}
     assert float(storage.claim_document()["prefilter_amount"]) == 450000.0
+
+
+def test_positive_without_type_or_quote_is_still_saved(test_db):
+    storage.upsert_document(source_row())
+    doc = storage.claim_document()
+    result = dict(positive(), requisition_type=None, evidence_quote="")
+    opp_id, created = storage.save_opportunity(doc, result)
+    assert created and opp_id
