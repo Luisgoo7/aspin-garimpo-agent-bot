@@ -265,7 +265,8 @@ def test_nota_aspin_is_explainable():
                                                  credit_nature="comum", legal_preference=None)))
     assert worker.nota_aspin(ceded)[0] == 4  # valor + expedido
     msg = worker.format_alert_compact(oficio_opp())
-    assert "Nota ASPIN 8/10</b> · IA 90%" in msg and "▫️ DataJud" in msg and "✅ alimentar" in msg
+    assert "⭐ <b>Nota ASPIN 8/10</b>" in msg.splitlines()
+    assert "IA 90%" not in msg and "✅" not in msg and "▫️" not in msg  # notificação mostra só a nota
 
 
 @pytest.mark.asyncio
