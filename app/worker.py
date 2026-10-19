@@ -91,6 +91,40 @@ def brl(amount) -> str:
     return f"R$ {float(amount):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+# Nota ASPIN: critérios objetivos e verificáveis, somando 10 pontos.
+NOTA_CRITERIA = (
+    ("valor", "Valor citado no texto", 2),
+    ("expedido", "Requisição expedida/ordenada", 2),
+    ("datajud", "Expedição confirmada no DataJud", 2),
+    ("sem_cessao", "Sem FIDC/banco/cessionário citado", 2),
+    ("alimentar", "Natureza alimentar", 1),
+    ("preferencia", "Preferência legal (idoso, doença grave)", 1),
+)
+
+
+def nota_aspin(opp: dict) -> tuple[int, list[tuple[str, str, bool, int]]]:
+    """(pontos de 0 a 10, [(chave, descrição, atendido, peso)]).
+
+    Diferente da confiança da IA (opinião do modelo), cada ponto aqui é um fato
+    conferível na publicação ou no DataJud.
+    """
+    result = opp.get("classification") or {}
+    checks = {
+        "valor": opp.get("amount") is not None and float(opp.get("amount") or 0) > 0,
+        "expedido": opp.get("requisition_type") in ("oficio_requisitorio", "precatorio", "rpv"),
+        "datajud": bool(opp.get("datajud_signal")),
+        "sem_cessao": not result.get("third_party_interest"),
+        "alimentar": result.get("credit_nature") == "alimentar",
+        "preferencia": bool(result.get("legal_preference")),
+    }
+    items = [(key, label, checks[key], weight) for key, label, weight in NOTA_CRITERIA]
+    return sum(weight for _, _, ok, weight in items if ok), items
+
+
+NOTA_SHORT = {"valor": "valor", "expedido": "expedido", "datajud": "DataJud",
+              "sem_cessao": "sem cessão", "alimentar": "alimentar", "preferencia": "preferência"}
+
+
 def rank_score(opp: dict) -> float:
     """Valor esperado do crédito para a ASPIN, usado para escolher as 3 melhores.
 
@@ -197,10 +231,9 @@ def format_alert_compact(opp: dict, position: int | None = None, total: int | No
     credor = _v(opp.get("beneficiary"), "credor n/i")
     devedor = _v(opp.get("debtor_entity"), "devedor n/i")
     lines.append(f"👤 {e(credor[:60])} → {e(devedor[:60])}")
-    confidence = f"⭐ Confiança {float(opp.get('potential_score') or 0):.0%}"
-    if opp.get("datajud_signal"):
-        confidence += " · DataJud ✔"
-    lines.append(confidence)
+    nota, items = nota_aspin(opp)
+    lines.append(f"⭐ <b>Nota ASPIN {nota}/10</b> · IA {float(opp.get('potential_score') or 0):.0%}")
+    lines.append(" · ".join(("✅ " if ok else "▫️ ") + NOTA_SHORT[key] for key, _, ok, _ in items))
     if result.get("third_party_interest"):
         lines.append("⚠️ FIDC/banco citado — verificar cessão")
     url = opp.get("document_url") or opp.get("source_url")
@@ -209,7 +242,21 @@ def format_alert_compact(opp: dict, position: int | None = None, total: int | No
     return "\n".join(lines)[:4000]
 
 
+SHEET_HEADERS = (
+    "Aprovado em", "Aprovado por", "Nota ASPIN (0-10)", "Valor (R$)", "Credor", "Devedor", "Tribunal", "Tipo",
+    "Processo", "Natureza", "Preferência legal", "Terceiro interessado", "Confirmado DataJud",
+    "Critérios atendidos", "Confiança IA", "Comissão estimada (R$)", "Honorários destacados (R$)",
+    "Nº requisição", "Classe", "Órgão julgador", "Processo referência", "Assunto", "Trânsito em julgado",
+    "Fonte", "Publicação (trecho)", "ID interno",
+)
+
+
 def sheet_row(opp: dict) -> dict:
+    row = _sheet_values(opp)
+    return {header: row.get(header, "") for header in SHEET_HEADERS}
+
+
+def _sheet_values(opp: dict) -> dict:
     """Linha completa da planilha (cabeçalhos iguais aos da aba)."""
     result = opp.get("classification") or {}
     amount = float(opp.get("amount") or 0)
@@ -236,7 +283,9 @@ def sheet_row(opp: dict) -> dict:
         "Honorários destacados (R$)": result.get("contractual_fees_amount") or "",
         "Trânsito em julgado": result.get("res_judicata_date") or "",
         "Terceiro interessado": "Sim — verificar cessão" if result.get("third_party_interest") else "Não citado",
-        "Confiança": f"{float(opp.get('potential_score') or 0):.0%}",
+        "Nota ASPIN (0-10)": nota_aspin(opp)[0],
+        "Critérios atendidos": "; ".join(label for _, label, ok, _ in nota_aspin(opp)[1] if ok),
+        "Confiança IA": round(float(opp.get("potential_score") or 0), 4),
         "Comissão estimada (R$)": round(amount * settings.aspin_commission_rate, 2),
         "Confirmado DataJud": "Sim" if opp.get("datajud_signal") else "Não",
         "Fonte": opp.get("document_url") or opp.get("source_url") or "",
@@ -316,6 +365,14 @@ async def sync_sheet(metrics: dict) -> None:
         if pending:
             metrics["sheet_not_configured"] = True
         return
+    # Reorganiza/formata a planilha uma vez por versão de layout (após atualizar o script).
+    if storage.get_state("sheet_layout").get("version") != sheets.LAYOUT_VERSION:
+        try:
+            await sheets.format_sheet()
+            storage.set_state("sheet_layout", {"version": sheets.LAYOUT_VERSION})
+            metrics["sheet_formatted"] = True
+        except sheets.SheetsError as exc:
+            metrics["sheet_format_pending"] = str(exc)
     for opp in storage.sheet_outbox(50):
         try:
             opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
