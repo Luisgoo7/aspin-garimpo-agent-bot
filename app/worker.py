@@ -71,7 +71,7 @@ def decide_outcome(metrics: dict, errors: list[str]) -> str:
         return "ai_failed"
     if metrics.get("alerts_failed") and not metrics.get("alerts"):
         return "alert_failed"
-    if errors or metrics.get("limited") or metrics.get("datajud_backlog"):
+    if errors or metrics.get("limited") or metrics.get("datajud_backlog") or metrics.get("ai_budget_exhausted"):
         return "partial"
     return "success"
 
@@ -143,6 +143,8 @@ def status_message(metrics: dict, errors: list[str]) -> str:
         f"Aguardando enriquecimento: {queue.get('needs_enrichment', 0)}\n"
         f"Falhas aguardando revisão: {queue.get('failed', 0)}"
     )
+    if metrics.get("djen_disabled"):
+        text += "\nDJEN: desativado neste coletor (a API do DJEN só aceita IPs do Brasil)"
     if errors:
         text += "\n\nFalhas: " + "; ".join(errors[:4])[:800]
     elif not metrics.get("opportunities"):
@@ -193,7 +195,12 @@ async def _collect_datajud(metrics: dict, errors: list[str]):
 
 async def _process_queue(metrics: dict, errors: list[str]):
     classifier = LLMClassifier()
+    deadline = time.monotonic() + settings.ai_time_budget_seconds
     for _ in range(settings.max_classify_per_cycle):
+        if time.monotonic() >= deadline:
+            # Orçamento de tempo esgotado: o restante segue na fila para o próximo ciclo.
+            metrics["ai_budget_exhausted"] = True
+            break
         doc = storage.claim_document()
         if not doc:
             break
@@ -302,14 +309,19 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
         if storage.DSN_REPAIRED[0]:
             metrics["aviso_config"] = "DATABASE_URL com região do pooler sem hífen; corrigida em memória — corrija o secret"
         errors = []
-        sources = ["djen"] + (["datajud"] if settings.enable_datajud else [])
+        sources = (["djen"] if settings.enable_djen else []) + (["datajud"] if settings.enable_datajud else [])
         run_id = storage.start_run(sources, "simulation" if settings.simulate_failure else "scheduled")
         try:
             cursor = storage.get_state("djen_cursor") or None
             query_since = date.fromisoformat(cursor["since"]) if cursor else since.date()
             query_until = date.fromisoformat(cursor["until"]) if cursor else now.date()
             with timed(metrics, "djen"):
-                if simulated("djen"):
+                if not settings.enable_djen:
+                    # Ex.: GitHub Actions (IP fora do Brasil): DJEN roda em outro coletor.
+                    metrics["djen_disabled"] = True
+                    batch = SimpleNamespace(rows=[], pages=0, totals={}, limited=False, cursor=cursor,
+                                            errors=[], retry_cursors=[])
+                elif simulated("djen"):
                     batch = SimpleNamespace(rows=[], pages=0, totals={}, limited=False, cursor=cursor,
                                             errors=["djen_simulado: falha simulada da fonte"], retry_cursors=[])
                 else:
@@ -321,7 +333,7 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
                 errors.extend(batch.errors)
                 for row in batch.rows:
                     storage.upsert_document(row)
-                if not simulated("djen"):
+                if settings.enable_djen and not simulated("djen"):
                     storage.set_state("djen_cursor", batch.cursor or {})
                     await recover_queries(batch, metrics, errors, now)
             with timed(metrics, "datajud"):
@@ -341,7 +353,7 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
                 await maybe_send_status(metrics, errors)
             except Exception as exc:
                 errors.append("status_telegram: " + storage.safe_error(exc))
-            if outcome != "source_failed" and batch.cursor is None:
+            if settings.enable_djen and outcome != "source_failed" and batch.cursor is None:
                 covered = min(now, datetime.combine(query_until + timedelta(days=1), datetime.min.time(), timezone.utc))
                 storage.set_state("last_collection", {"at": covered.isoformat()})
             storage.set_state("last_health", {"at": datetime.now(timezone.utc).isoformat(), "outcome": outcome})
@@ -451,6 +463,11 @@ def main():
         log.error("%s", exc)
         write_summary(None, str(exc))
         return EXIT_CONFIG
+    except (TimeoutError, asyncio.TimeoutError):
+        message = f"Tempo do ciclo esgotado ({settings.cycle_timeout_seconds}s); o ciclo foi registrado como failed e a fila segue para o próximo"
+        log.error("%s", message)
+        write_summary(None, message)
+        return EXIT_UNEXPECTED
     except storage.DatabaseUnavailable as exc:
         log.error("Banco inacessível. %s", exc)
         write_summary(None, f"Banco inacessível. {exc}")

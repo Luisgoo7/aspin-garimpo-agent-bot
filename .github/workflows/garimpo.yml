@@ -54,7 +54,9 @@ jobs:
   collect:
     name: Validar, coletar e classificar
     needs: tests
-    runs-on: ubuntu-latest
+    # A API do DJEN recusa IPs fora do Brasil. Com um runner próprio no Brasil
+    # (VM/PC), defina as variáveis RUNNER=self-hosted e ENABLE_DJEN=true.
+    runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 35
     permissions:
       contents: read
@@ -70,6 +72,7 @@ jobs:
       DATAJUD_API_KEY: ${{ secrets.DATAJUD_API_KEY }}
       DATAJUD_TRIBUNALS: ${{ vars.DATAJUD_TRIBUNALS || 'api_publica_tjsp,api_publica_trf3,api_publica_trf1,api_publica_trf2,api_publica_trf4,api_publica_trf5,api_publica_trf6,api_publica_tjrj,api_publica_tjmg' }}
       DJEN_TRIBUNALS: ${{ vars.DJEN_TRIBUNALS || '' }}
+      ENABLE_DJEN: ${{ vars.ENABLE_DJEN || 'false' }}
       SIMULATE_FAILURE: ${{ inputs.simulate_failure || '' }}
       MIN_CONFIDENCE: '0.78'
       MIN_OPPORTUNITY_AMOUNT: '100000'
@@ -84,7 +87,8 @@ jobs:
       DJEN_MAX_DOCUMENTS: '8000'
       DJEN_MAX_REQUESTS: '150'
       DATAJUD_PAGE_SIZE: '100'
-      DATAJUD_MAX_PAGES: '5'
+      DATAJUD_MAX_PAGES: '2'
+      AI_TIME_BUDGET_SECONDS: '600'
     steps:
       - name: Baixar código
         uses: actions/checkout@v4

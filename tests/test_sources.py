@@ -102,7 +102,7 @@ def test_search_djen_stops_globally_on_403_with_explicit_error(monkeypatch):
 
     result = run_search(date(2026, 1, 1), date(2026, 1, 1))
 
-    assert result.errors == ["djen_http_403: acesso negado/origem geográfica"]
+    assert len(result.errors) == 1 and result.errors[0].startswith("djen_http_403: acesso negado")
     assert len(calls) == 1
     assert result.limited is True
     assert result.cursor == {

@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import re
+import time
 import unicodedata
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -20,7 +21,10 @@ DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 DEFAULT_NVIDIA_MODEL = "openai/gpt-oss-20b"
 MAX_RETRIES = 3
-MAX_RETRY_DELAY = 60.0
+MAX_RETRY_DELAY = 15.0
+# Provedor que esgota as tentativas com 429 fica em pausa, em vez de travar o ciclo.
+RATE_LIMIT_COOLDOWN_SECONDS = 600
+_COOLDOWN_UNTIL: dict[str, float] = {}
 
 SYSTEM_PROMPT = """Você é um analista sênior de oportunidades processuais para a ASPIN Consultoria Empresarial.
 Analise somente o texto fornecido e nunca invente dados. Uma publicação é apenas um candidato para
@@ -370,6 +374,14 @@ def _safe_error(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _requested_delay(response: httpx.Response | Any) -> float | None:
+    valor = getattr(response, "headers", {}).get("retry-after")
+    try:
+        return float(str(valor).strip()) if valor else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _retry_delay(response: httpx.Response | Any, attempt: int) -> float:
     valor = getattr(response, "headers", {}).get("retry-after")
     if valor:
@@ -403,6 +415,9 @@ class LLMClassifier:
         for nome, chave, chamada in provedores:
             if not str(chave or "").strip():
                 continue
+            if _COOLDOWN_UNTIL.get(nome, 0) > time.monotonic():
+                erros.append(f"{nome.lower()}: em pausa após limite 429")
+                continue
             try:
                 bruto = await chamada(evidence)
                 normalized = self._normalize(bruto, evidence)
@@ -411,6 +426,8 @@ class LLMClassifier:
                 return normalized
             except Exception as exc:
                 mensagem = _safe_error(exc)
+                if getattr(exc, "status", None) == 429:
+                    _COOLDOWN_UNTIL[nome] = time.monotonic() + RATE_LIMIT_COOLDOWN_SECONDS
                 log.error("%s falhou: %s", nome, mensagem)
                 erros.append(f"{nome.lower()}: {mensagem}")
 
@@ -522,7 +539,11 @@ class LLMClassifier:
 
                 status = getattr(response, "status_code", 0)
                 if status == 429 or 500 <= status <= 599:
-                    ultimo_erro = _ProviderError("HTTP", status)
+                    ultimo_erro = _ProviderError("limite" if status == 429 else "indisponível", status)
+                    pedido = _requested_delay(response)
+                    if status == 429 and pedido is not None and pedido > MAX_RETRY_DELAY:
+                        # Janela de limite longa (ex.: 60s): passa para o próximo provedor já.
+                        raise ultimo_erro
                     if tentativa < MAX_RETRIES - 1:
                         await asyncio.sleep(_retry_delay(response, tentativa))
                         continue

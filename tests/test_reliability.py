@@ -348,3 +348,41 @@ def test_pooler_region_missing_hyphen_is_repaired(monkeypatch):
     assert dbcheck.repair_pooler_dsn(broken) == broken.replace("ca-central1", "ca-central-1")
     assert dbcheck.repair_pooler_dsn(broken.replace("ca-central1", "ca-central-1")) is None
     assert dbcheck.repair_pooler_dsn(DIRECT) is None
+
+
+@pytest.mark.asyncio
+async def test_long_429_switches_provider_and_pauses_it(monkeypatch):
+    from app import llm
+    llm._COOLDOWN_UNTIL.clear()
+    monkeypatch.setattr(settings, "groq_api_key", "g")
+    monkeypatch.setattr(settings, "gemini_api_key", "")
+    monkeypatch.setattr(settings, "nvidia_api_key", "n")
+    sleeps = []
+    monkeypatch.setattr(llm.asyncio, "sleep", AsyncMock(side_effect=lambda s: sleeps.append(s)))
+    calls = []
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            calls.append(url)
+            return FakeResponse(429, {}, {"retry-after": "60"})
+    monkeypatch.setattr(llm.httpx, "AsyncClient", Client)
+    result = await llm.LLMClassifier().classify("RPV expedida R$ 200.000,00")
+    assert result["error"] and sleeps == []  # não espera 60s
+    assert len(calls) == 2  # uma tentativa por provedor
+    again = await llm.LLMClassifier().classify("RPV expedida R$ 200.000,00")
+    assert len(calls) == 2 and "em pausa" in again["reason"]
+    llm._COOLDOWN_UNTIL.clear()
+
+
+def test_djen_can_be_disabled_without_counting_as_failure():
+    metrics = base_metrics(djen_pages=0, djen_disabled=True)
+    assert worker.decide_outcome(metrics, []) == "success"

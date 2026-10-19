@@ -187,7 +187,7 @@ async def _fetch_page(
         if status == 403:
             # Não tentar contornar bloqueio geográfico, CAPTCHA ou qualquer
             # outro controle de acesso.
-            _append_error(errors, "djen_http_403: acesso negado/origem geográfica")
+            _append_error(errors, "djen_http_403: acesso negado — a API do DJEN recusa IPs fora do Brasil (ex.: runners do GitHub); rode o DJEN em servidor no Brasil")
             return _PageFetch(global_stop=True)
 
         if status == 429 or 500 <= status <= 599:
