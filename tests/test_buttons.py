@@ -9,10 +9,7 @@ from app.config import settings
 
 from test_reliability import oficio_opp
 
-HEADERS = ("Aprovado em,Aprovado por,Processo,Tribunal,Tipo,Nº requisição,Valor (R$),Natureza,Preferência legal,"
-           "Credor,Devedor,Classe,Órgão julgador,Processo referência,Assunto,Honorários destacados (R$),"
-           "Trânsito em julgado,Terceiro interessado,Confiança,Comissão estimada (R$),Confirmado DataJud,Fonte,"
-           "Publicação (trecho),ID interno").split(",")
+HEADERS = list(worker.SHEET_HEADERS)
 
 
 def test_compact_alert_is_short_and_clean():
@@ -36,12 +33,16 @@ def test_sheet_row_has_every_column_of_the_spreadsheet():
     assert list(row) == HEADERS
     assert row["Aprovado em"] == "19/10/2026 12:00" and row["Valor (R$)"] == 300000.0
     assert row["Natureza"] == "Alimentar" and row["Comissão estimada (R$)"] == 15000.0
+    assert row["Nota ASPIN (0-10)"] == 8 and row["Confiança IA"] == 0.9  # sem DataJud: 10 - 2
+    assert "Natureza alimentar" in row["Critérios atendidos"] and "DataJud" not in row["Critérios atendidos"]
 
 
 def test_apps_script_uses_the_same_columns_as_the_spreadsheet():
     script = open("docs/planilha_apps_script.gs", encoding="utf-8").read()
-    for header in ("Processo", "Nº requisição", "Processo referência", "ID interno"):
-        assert f"'{header}'" in script
+    start = script.index("const HEADERS = [")
+    block = script[start:script.index("];", start)]
+    import re
+    assert re.findall(r"'([^']+)'", block) == HEADERS
 
 
 class ButtonsStore:
@@ -254,3 +255,41 @@ async def test_dispatch_uses_github_api_with_job_token(monkeypatch):
     assert await worker.dispatch_collector("teste") is True
     assert seen["url"].endswith("/repos/dono/repo/actions/workflows/garimpo.yml/dispatches")
     assert seen["auth"] == "Bearer tok" and seen["body"] == {"ref": "main"}
+
+
+
+def test_nota_aspin_is_explainable():
+    nota, items = worker.nota_aspin(dict(oficio_opp(), datajud_signal={"published_at": None}))
+    assert nota == 10 and all(ok for _, _, ok, _ in items)
+    ceded = dict(oficio_opp(classification=dict(oficio_opp()["classification"], third_party_interest=True,
+                                                 credit_nature="comum", legal_preference=None)))
+    assert worker.nota_aspin(ceded)[0] == 4  # valor + expedido
+    msg = worker.format_alert_compact(oficio_opp())
+    assert "Nota ASPIN 8/10</b> · IA 90%" in msg and "▫️ DataJud" in msg and "✅ alimentar" in msg
+
+
+@pytest.mark.asyncio
+async def test_format_is_never_sent_to_old_script(monkeypatch):
+    from app import sheets
+    monkeypatch.setattr(settings, "sheets_webhook_url", "https://script.google.com/macros/s/x/exec")
+    monkeypatch.setattr(settings, "sheets_token", "t")
+    posts = []
+    monkeypatch.setattr(sheets, "script_version", AsyncMock(return_value=1))
+    monkeypatch.setattr(sheets, "_post", AsyncMock(side_effect=lambda *a, **k: posts.append(a) or True))
+    with pytest.raises(sheets.SheetsError, match="desatualizado"):
+        await sheets.format_sheet()
+    assert posts == []
+    monkeypatch.setattr(sheets, "script_version", AsyncMock(return_value=2))
+    assert await sheets.format_sheet() is True and posts[0][0]["action"] == "format"
+
+
+@pytest.mark.asyncio
+async def test_layout_is_formatted_once_per_version(monkeypatch, telegram_fakes):
+    store = ButtonsStore()
+    store.install(monkeypatch)
+    fmt = AsyncMock(return_value=True)
+    monkeypatch.setattr(worker.sheets, "format_sheet", fmt)
+    monkeypatch.setattr(worker, "get_updates", AsyncMock(return_value=[]))
+    first = await worker.process_buttons()
+    second = await worker.process_buttons()
+    assert first.get("sheet_formatted") and not second.get("sheet_formatted") and fmt.await_count == 1
