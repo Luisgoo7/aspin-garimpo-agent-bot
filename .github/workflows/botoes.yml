@@ -2,7 +2,7 @@ name: Botões Telegram (Aprovar/Descartar)
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # lê os cliques a cada 5 min (o GitHub pode atrasar alguns minutos)
+    - cron: '*/10 * * * *'  # lê os cliques a cada 10 min (o GitHub pode atrasar alguns minutos)
   workflow_dispatch:
 
 concurrency:
@@ -12,7 +12,8 @@ concurrency:
 jobs:
   buttons:
     name: Processar aprovações e gravar na planilha
-    runs-on: ubuntu-latest
+    # Com runner próprio (variável RUNNER=self-hosted) os minutos são ilimitados.
+    runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 8
     permissions:
       contents: read
