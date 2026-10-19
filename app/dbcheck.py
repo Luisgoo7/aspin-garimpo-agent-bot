@@ -59,6 +59,8 @@ def describe_target(dsn: str) -> dict:
     if not info["configurada"]:
         return info
     dsn = dsn.strip()
+    if "your-password" in dsn.casefold() or re.search(r"://[^@/]*\[", dsn):
+        info["contem_placeholder"] = True
     try:
         parts = urlsplit(dsn)
         port = parts.port
@@ -85,11 +87,21 @@ def describe_target(dsn: str) -> dict:
     elif host in ("localhost", "127.0.0.1", "postgres", "db"):
         info["tipo_host"] = "local"
         info["host"] = host
+    elif re.match(r"^[a-z0-9]{20}\.supabase\.co$", host):
+        info["tipo_host"] = "supabase_api_em_vez_de_banco"
+        info["host"] = "<ref>.supabase.co"
     elif host:
         info["tipo_host"] = "outro"
-        info["host"] = "(oculto)"
+        labels = host.split(".")
+        # Só o domínio de topo (ex.: supabase.com, neon.tech) — nunca o host inteiro.
+        info["host"] = "(oculto)." + ".".join(labels[-2:]) if len(labels) >= 2 else "(oculto, sem domínio)"
     else:
         info["tipo_host"] = "sem_host"
+    netloc = parts.netloc
+    if netloc.count("@") > 1:
+        info["senha_com_caractere_reservado"] = True
+    if any(c.isspace() for c in dsn):
+        info["contem_espaco"] = True
     if host:
         info.update(resolve(host, info["porta"]))
     return info
@@ -126,6 +138,15 @@ def diagnose(dsn: str, exc: BaseException | None = None) -> dict:
     if target.get("formato") == "url_rest_em_vez_de_postgres":
         result["categoria"] = "url_rest_em_vez_de_postgres"
         result["dica"] = "DATABASE_URL está com a URL REST (https://...). Use a URI postgresql:// do Session pooler."
+    elif target.get("contem_placeholder"):
+        result["categoria"] = "placeholder_na_uri"
+        result["dica"] = "A URI ainda tem o texto [YOUR-PASSWORD]/colchetes. Troque pela senha real do banco (sem colchetes)."
+    elif target.get("senha_com_caractere_reservado"):
+        result["categoria"] = "senha_sem_url_encoding"
+        result["dica"] = "A senha contém @ (ou outro caractere reservado) sem URL encoding; o host fica errado. Codifique a senha (@ vira %40) ou gere uma senha sem símbolos."
+    elif target.get("tipo_host") == "supabase_api_em_vez_de_banco":
+        result["categoria"] = "host_da_api_em_vez_do_banco"
+        result["dica"] = "O host é <ref>.supabase.co (API). Use a URI do Session pooler (host *.pooler.supabase.com)."
     elif target.get("dns") == "nao_resolve":
         result["categoria"] = "dns_nao_resolve"
         result["dica"] = ("O host do banco não existe no DNS: projeto Supabase pausado/excluído ou host errado. "
@@ -143,7 +164,8 @@ def diagnose(dsn: str, exc: BaseException | None = None) -> dict:
 def format_diagnosis(diag: dict) -> str:
     target = diag.get("alvo", {})
     keys = ("configurada", "formato", "esquema_ok", "tipo_host", "host", "porta", "pooler_modo",
-            "usuario_com_ref", "tem_senha", "banco", "dns", "ipv4", "ipv6")
+            "usuario_com_ref", "tem_senha", "banco", "dns", "ipv4", "ipv6",
+            "senha_com_caractere_reservado", "contem_placeholder", "contem_espaco")
     alvo = ", ".join(f"{k}={target[k]}" for k in keys if k in target)
     text = f"Banco: {alvo}"
     if diag.get("categoria"):

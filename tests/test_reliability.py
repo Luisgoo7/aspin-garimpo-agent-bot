@@ -320,3 +320,16 @@ async def test_simulated_djen_failure_is_recorded_as_error_not_zero(monkeypatch)
     assert any("falha simulada" in e for e in recorded["errors"])
     assert "last_collection" not in recorded.get("state", {})  # janela não é dada como coberta
     assert worker.OUTCOME_EXIT[result["outcome"]] == worker.EXIT_SOURCE_FAILED
+
+
+def test_password_with_unencoded_at_is_flagged(monkeypatch):
+    monkeypatch.setattr(dbcheck, "resolve", lambda host, port: {"dns": "nao_resolve", "ipv4": 0, "ipv6": 0})
+    diag = dbcheck.diagnose("postgresql://postgres:abc@def@db.abcdefghijklmnopqrst.supabase.co:5432/postgres")
+    assert diag["categoria"] == "senha_sem_url_encoding"
+
+
+def test_placeholder_and_unknown_host_are_reported_without_host(monkeypatch):
+    monkeypatch.setattr(dbcheck, "resolve", lambda host, port: {"dns": "nao_resolve", "ipv4": 0, "ipv6": 0})
+    assert dbcheck.diagnose("postgresql://postgres:[YOUR-PASSWORD]@db.abcdefghijklmnopqrst.supabase.co:5432/postgres")["categoria"] == "placeholder_na_uri"
+    text = dbcheck.format_diagnosis(dbcheck.diagnose(f"postgresql://u:{SECRET}@meu-servidor-secreto.exemplo.com:5432/postgres"))
+    assert "host=(oculto).exemplo.com" in text and "meu-servidor-secreto" not in text and SECRET not in text
