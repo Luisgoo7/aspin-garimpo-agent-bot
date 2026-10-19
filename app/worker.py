@@ -835,6 +835,39 @@ async def send_preview() -> int:
     return EXIT_OK
 
 
+def collector_dispatch_reason(now: datetime | None = None) -> str | None:
+    """Vigia: por que disparar a coleta agora (o cron do GitHub atrasa ou pula execuções)."""
+    now = now or datetime.now(timezone.utc)
+    if storage.lease_holder():
+        return None  # já há um ciclo rodando
+    slot = digest_slot_due(now)
+    if slot is not None and storage.get_state("last_digest").get("slot") != slot.isoformat():
+        return f"entrega das {slot:%H}h pendente"
+    minutes = storage.minutes_since_last_cycle()
+    if minutes is None or minutes > settings.collector_max_gap_minutes:
+        return "coleta atrasada" if minutes is not None else "nenhum ciclo registrado"
+    return None
+
+
+async def dispatch_collector(reason: str) -> bool:
+    """Dispara o workflow de coleta pela API do GitHub com o token do próprio job."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if not token or not repo:
+        return False
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/garimpo.yml/dispatches"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28"}
+    import httpx
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(url, headers=headers, json={"ref": os.environ.get("GITHUB_REF_NAME") or "main"})
+    if response.status_code >= 300:
+        log.warning("Vigia não conseguiu disparar a coleta (HTTP %s)", response.status_code)
+        return False
+    log.info("Vigia disparou a coleta: %s", reason)
+    return True
+
+
 def buttons_exit_code(result: dict) -> int:
     """Falha da planilha é tolerada (a aprovação fica na fila); vermelho só se persistir."""
     state = storage.get_state("sheet_failures")
@@ -914,6 +947,13 @@ def main():
             require_configuration()
             storage.ensure_schema()
             result = asyncio.run(process_buttons())
+            try:
+                reason = collector_dispatch_reason()
+                if reason:
+                    result["collector_dispatched"] = asyncio.run(dispatch_collector(reason))
+                    result["collector_dispatch_reason"] = reason
+            except Exception as exc:
+                log.warning("Vigia indisponível: %s", storage.safe_error(exc))
             print(json.dumps(result, ensure_ascii=False))
             write_buttons_summary(result)
             return buttons_exit_code(result)

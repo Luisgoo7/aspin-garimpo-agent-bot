@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     # IDs numéricos do Telegram autorizados a aprovar/descartar (vazio = qualquer membro do canal).
     telegram_approvers: str = ""
     sheet_failure_streak_to_alert: int = Field(default=3, ge=1, le=100)
+    collector_max_gap_minutes: int = Field(default=65, ge=10, le=1440)
     ai_max_chars: int = Field(default=6000, ge=1000, le=30000)
     failure_streak_to_alert: int = Field(default=3, ge=1, le=48)
     digest_max_delay_minutes: int = Field(default=180, ge=10, le=720)
