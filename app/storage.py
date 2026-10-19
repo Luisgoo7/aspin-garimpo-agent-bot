@@ -1,4 +1,5 @@
 import hashlib
+import os
 import json
 import time
 from contextlib import contextmanager
@@ -14,6 +15,7 @@ from .dbcheck import diagnose, format_diagnosis, repair_pooler_dsn
 from .opportunity import canonical_alias, canonical_cnj, clean_text, keyword_score, max_amount_in_text
 
 LOCK_ID = 418739261
+APP_NAME = "aspin-garimpo-" + ("actions" if os.environ.get("GITHUB_ACTIONS") else "worker")
 MIGRATIONS = ("001_initial_schema.sql", "002_sources_and_runs.sql", "003_reliable_processing.sql", "004_prefilter_and_signals.sql")
 
 
@@ -51,7 +53,7 @@ def connect():
     dsn = effective_dsn()
     for attempt in range(3):
         try:
-            return psycopg.connect(dsn, connect_timeout=15, row_factory=dict_row)
+            return psycopg.connect(dsn, connect_timeout=15, row_factory=dict_row, application_name=APP_NAME)
         except psycopg.OperationalError as exc:
             if attempt == 2:
                 raise DatabaseUnavailable(format_diagnosis(diagnose(dsn, exc))) from None
@@ -62,7 +64,10 @@ def check_connection() -> str:
     """Testa a conexão e devolve o diagnóstico sanitizado do alvo."""
     with connect() as conn:
         version = conn.execute("show server_version").fetchone()["server_version"]
+        holder = lock_holder(conn)
     text = format_diagnosis(diagnose(effective_dsn())) + f" | conexão=ok, postgres={version.split()[0]}"
+    if holder:
+        text += f" | lock do coletor ocupado por outra sessão: {holder}"
     if DSN_REPAIRED[0]:
         text += (" | AVISO: a região do pooler no secret está sem hífen (ex.: ca-central1); "
                  "o coletor corrigiu em memória, mas corrija o secret")
@@ -74,6 +79,23 @@ def ensure_schema():
     with connect() as conn:
         for name in MIGRATIONS:
             conn.execute((root / name).read_text(encoding="utf-8"))
+
+
+def lock_holder(conn) -> str | None:
+    """Quem segura o lock do coletor (sem IP nem texto de query)."""
+    try:
+        row = conn.execute("""select a.pid, a.application_name, a.state, a.backend_type,
+                extract(epoch from now()-a.backend_start)::int as conectado_s,
+                extract(epoch from now()-coalesce(a.state_change,a.backend_start))::int as parado_s
+            from pg_locks l left join pg_stat_activity a on a.pid=l.pid
+            where l.locktype='advisory' and l.objid=%s and l.granted and l.pid<>pg_backend_pid() limit 1""",
+            (LOCK_ID,)).fetchone()
+    except psycopg.Error:
+        return "não foi possível consultar pg_locks"
+    if not row:
+        return None
+    return (f"pid={row['pid']} app={row['application_name'] or '(vazio)'} estado={row['state']} "
+            f"conectado_ha={row['conectado_s']}s parado_ha={row['parado_s']}s")
 
 
 @contextmanager

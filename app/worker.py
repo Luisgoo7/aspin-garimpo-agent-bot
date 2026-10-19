@@ -278,8 +278,10 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
         raise storage.DatabaseUnavailable("Banco: causa=falha_simulada | como corrigir: remova SIMULATE_FAILURE")
     with storage.collector_lock() as locked:
         if not locked:
-            log.warning("Outro coletor já está executando; ciclo não duplicado")
-            return {"outcome": "skipped", "opportunities": 0, "errors": []}
+            with storage.connect() as conn:
+                holder = storage.lock_holder(conn)
+            log.warning("Outro coletor já está executando; ciclo não duplicado (%s)", holder)
+            return {"outcome": "skipped", "opportunities": 0, "errors": [], "lock_holder": holder}
         storage.ensure_schema()
         now = datetime.now(timezone.utc)
         last = storage.get_state("last_collection")
