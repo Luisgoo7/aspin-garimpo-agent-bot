@@ -10,7 +10,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .config import settings
-from .dbcheck import diagnose, format_diagnosis
+from .dbcheck import diagnose, format_diagnosis, repair_pooler_dsn
 from .opportunity import canonical_alias, canonical_cnj, clean_text, keyword_score, max_amount_in_text
 
 LOCK_ID = 418739261
@@ -30,13 +30,31 @@ def safe_error(exc: Exception) -> str:
     return type(exc).__name__ + (f" HTTP {code}" if code else "")
 
 
+_DSN_CACHE: dict[str, str] = {}
+DSN_REPAIRED = [False]
+
+
+def effective_dsn() -> str:
+    """DATABASE_URL, com a região do pooler corrigida quando o host original não existe.
+
+    A correção é sinalizada em todo diagnóstico/resumo para o secret ser ajustado.
+    """
+    dsn = settings.database_url
+    if dsn not in _DSN_CACHE:
+        repaired = repair_pooler_dsn(dsn)
+        _DSN_CACHE[dsn] = repaired or dsn
+        DSN_REPAIRED[0] = bool(repaired)
+    return _DSN_CACHE[dsn]
+
+
 def connect():
+    dsn = effective_dsn()
     for attempt in range(3):
         try:
-            return psycopg.connect(settings.database_url, connect_timeout=15, row_factory=dict_row)
+            return psycopg.connect(dsn, connect_timeout=15, row_factory=dict_row)
         except psycopg.OperationalError as exc:
             if attempt == 2:
-                raise DatabaseUnavailable(format_diagnosis(diagnose(settings.database_url, exc))) from None
+                raise DatabaseUnavailable(format_diagnosis(diagnose(dsn, exc))) from None
             time.sleep(2 ** attempt)
 
 
@@ -44,7 +62,11 @@ def check_connection() -> str:
     """Testa a conexão e devolve o diagnóstico sanitizado do alvo."""
     with connect() as conn:
         version = conn.execute("show server_version").fetchone()["server_version"]
-    return format_diagnosis(diagnose(settings.database_url)) + f" | conexão=ok, postgres={version.split()[0]}"
+    text = format_diagnosis(diagnose(effective_dsn())) + f" | conexão=ok, postgres={version.split()[0]}"
+    if DSN_REPAIRED[0]:
+        text += (" | AVISO: a região do pooler no secret está sem hífen (ex.: ca-central1); "
+                 "o coletor corrigiu em memória, mas corrija o secret")
+    return text
 
 
 def ensure_schema():

@@ -10,6 +10,30 @@ from urllib.parse import unquote, urlsplit
 DIRECT_HOST_RE = re.compile(r"^db\.([a-z0-9]{20})\.supabase\.co$")
 POOLER_HOST_RE = re.compile(r"^(aws-\d+-[a-z0-9-]+)\.pooler\.supabase\.com$")
 
+# Região AWS sem o último hífen (ex.: ca-central1 em vez de ca-central-1).
+BROKEN_REGION_RE = re.compile(r"^(aws-\d+-[a-z]+-[a-z]+)(\d+)(\.pooler\.supabase\.com)$")
+
+
+def repair_pooler_dsn(dsn: str) -> str | None:
+    """URI com a região do pooler corrigida, se a original não resolve e a corrigida resolve."""
+    try:
+        parts = urlsplit(dsn)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return None
+    match = BROKEN_REGION_RE.match(host)
+    if not match or resolve(host, 5432)["dns"] == "ok":
+        return None
+    fixed = f"{match.group(1)}-{match.group(2)}{match.group(3)}"
+    if resolve(fixed, 5432)["dns"] != "ok":
+        return None
+    netloc = parts.netloc
+    at = netloc.rfind("@")
+    hostport = netloc[at + 1:]
+    new_hostport = re.sub(re.escape(host), fixed, hostport, count=1, flags=re.I)
+    return parts._replace(netloc=netloc[:at + 1] + new_hostport).geturl()
+
+
 # (trecho da mensagem do driver em minúsculas, categoria, dica)
 _RULES = (
     ("network is unreachable", "ipv6_sem_rota",

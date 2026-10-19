@@ -339,3 +339,12 @@ def test_database_url_whitespace_is_removed():
     from app.config import Settings
     config = Settings(_env_file=None, database_url=" postgresql://u:p@aws-0-sa-east-1.pooler.\n supabase.com:5432/postgres \n")
     assert config.database_url == "postgresql://u:p@aws-0-sa-east-1.pooler.supabase.com:5432/postgres"
+
+
+def test_pooler_region_missing_hyphen_is_repaired(monkeypatch):
+    ok = {"aws-1-ca-central-1.pooler.supabase.com"}
+    monkeypatch.setattr(dbcheck, "resolve", lambda host, port: {"dns": "ok" if host in ok else "nao_resolve", "ipv4": 1, "ipv6": 0})
+    broken = f"postgresql://postgres.abcdefghijklmnopqrst:{SECRET}@aws-1-ca-central1.pooler.supabase.com:5432/postgres"
+    assert dbcheck.repair_pooler_dsn(broken) == broken.replace("ca-central1", "ca-central-1")
+    assert dbcheck.repair_pooler_dsn(broken.replace("ca-central1", "ca-central-1")) is None
+    assert dbcheck.repair_pooler_dsn(DIRECT) is None

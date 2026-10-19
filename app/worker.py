@@ -298,6 +298,8 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
                    "opportunities": 0, "alerts": 0, "alerts_failed": 0, "below_minimum": 0, "limited": False}
         if settings.simulate_failure:
             metrics["simulated_failure"] = settings.simulate_failure
+        if storage.DSN_REPAIRED[0]:
+            metrics["aviso_config"] = "DATABASE_URL com região do pooler sem hífen; corrigida em memória — corrija o secret"
         errors = []
         sources = ["djen"] + (["datajud"] if settings.enable_datajud else [])
         run_id = storage.start_run(sources, "simulation" if settings.simulate_failure else "scheduled")
@@ -402,6 +404,8 @@ def write_summary(result: dict | None, failure: str | None = None):
                 ("Fila", json.dumps(result.get("queue", {}), ensure_ascii=False)),
                 ("Duração (s)", json.dumps(result.get("duration_s", {}), ensure_ascii=False))]
         lines += ["| Métrica | Valor |", "|---|---|"] + [f"| {k} | {v} |" for k, v in rows]
+        if result.get("aviso_config"):
+            lines += ["", f"> ⚠️ {result['aviso_config']}"]
         if result.get("errors"):
             lines += ["", "**Falhas registradas:**"] + [f"- {e}" for e in result["errors"][:20]]
     try:
