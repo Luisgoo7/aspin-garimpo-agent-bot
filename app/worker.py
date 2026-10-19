@@ -415,8 +415,7 @@ async def _collect_datajud(metrics: dict, errors: list[str]):
             if simulated("datajud"):
                 raise DataJudError("falha simulada")
             rows, cursor, info = await collect_expeditions(alias, storage.get_state(key))
-            for row in rows:
-                storage.upsert_document(row)
+            storage.upsert_documents(rows)
             storage.set_state(key, cursor)  # só avança depois de gravar tudo
             metrics["datajud_documents"] += info["documents"]
             metrics["datajud_pages"] += info["pages"]
@@ -702,8 +701,7 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
                 metrics["djen_totals"] = batch.totals
                 metrics["limited"] = batch.limited
                 errors.extend(batch.errors)
-                for row in batch.rows:
-                    storage.upsert_document(row)
+                storage.upsert_documents(batch.rows)
                 if settings.enable_djen and not simulated("djen"):
                     storage.set_state("djen_cursor", batch.cursor or {})
                     await recover_queries(batch, metrics, errors, now)

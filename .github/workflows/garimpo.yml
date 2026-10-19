@@ -66,7 +66,7 @@ jobs:
     # A API do DJEN recusa IPs fora do Brasil. Com um runner próprio no Brasil
     # (VM/PC), defina as variáveis RUNNER=self-hosted e ENABLE_DJEN=true.
     runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 35
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -99,8 +99,8 @@ jobs:
       STATUS_TELEGRAM: failures
       DJEN_PAGE_SIZE: '100'
       DJEN_MAX_PAGES: '30'
-      DJEN_MAX_DOCUMENTS: '8000'
-      DJEN_MAX_REQUESTS: '150'
+      DJEN_MAX_DOCUMENTS: '4000'
+      DJEN_MAX_REQUESTS: '80'
       DATAJUD_PAGE_SIZE: '100'
       DATAJUD_MAX_PAGES: '2'
       AI_TIME_BUDGET_SECONDS: '900'

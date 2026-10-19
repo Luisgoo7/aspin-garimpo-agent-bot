@@ -25,7 +25,7 @@ def test_due_query_recovers_and_leaves_queue(monkeypatch):
     monkeypatch.setattr(source_retry.storage,'get_state',lambda key:state.get(key,{}))
     monkeypatch.setattr(source_retry.storage,'set_state',lambda key,value:state.update({key:value}))
     saved=[]
-    monkeypatch.setattr(source_retry.storage,'upsert_document',saved.append)
+    monkeypatch.setattr(source_retry.storage,'upsert_documents',saved.extend)
     result=SimpleNamespace(rows=[{'id':'recovered'}],pages=1,errors=[],cursor=None)
     search=AsyncMock(return_value=result)
     monkeypatch.setattr(source_retry,'search_djen',search)

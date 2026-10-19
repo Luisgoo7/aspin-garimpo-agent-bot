@@ -245,7 +245,7 @@ async def test_datajud_failure_does_not_advance_cursor(monkeypatch):
     monkeypatch.setattr(settings, "enable_datajud", True)
     monkeypatch.setattr(storage, "get_state", lambda key: {})
     monkeypatch.setattr(storage, "set_state", lambda key, value: saved.__setitem__(key, value))
-    monkeypatch.setattr(storage, "upsert_document", lambda row: "id")
+    monkeypatch.setattr(storage, "upsert_documents", lambda rows: len(rows))
 
     async def collect(alias, cursor):
         if alias == "api_publica_trf3":
@@ -551,7 +551,7 @@ async def test_datajud_time_budget_rotates_tribunals(monkeypatch):
     monkeypatch.setattr(settings, "datajud_time_budget_seconds", 30)
     monkeypatch.setattr(storage, "get_state", lambda key: state.get(key, {}))
     monkeypatch.setattr(storage, "set_state", lambda key, value: state.__setitem__(key, value))
-    monkeypatch.setattr(storage, "upsert_document", lambda row: "id")
+    monkeypatch.setattr(storage, "upsert_documents", lambda rows: len(rows))
     clock = SimpleNamespace(t=0.0)
     monkeypatch.setattr(worker, "time", SimpleNamespace(monotonic=lambda: clock.t))
     seen = []
