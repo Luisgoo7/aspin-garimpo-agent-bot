@@ -209,3 +209,48 @@ async def test_sheets_client_follows_apps_script_redirect(monkeypatch):
     monkeypatch.setattr(sheets.httpx, "AsyncClient", Client)
     assert await sheets.append_row({"ID interno": "1"}) is True
     assert seen["follow_redirects"] is True and seen["payload"] == {"token": "t", "row": {"ID interno": "1"}}
+
+
+@pytest.mark.parametrize("lease,last_digest,minutes,utc,expected", [
+    ("worker (expira em 900s)", {}, 200, "2026-10-19T15:10:00", None),          # ciclo rodando
+    (None, {}, 10, "2026-10-19T15:10:00", "entrega das 12h pendente"),           # 12h ainda não entregue
+    (None, {"slot": "2026-10-19T12:00:00-03:00"}, 10, "2026-10-19T15:10:00", None),
+    (None, {"slot": "2026-10-19T12:00:00-03:00"}, 90, "2026-10-19T15:10:00", "coleta atrasada"),
+    (None, {}, None, "2026-10-19T20:00:00", "nenhum ciclo registrado"),      # 17h: fora da janela de entrega
+])
+def test_watchdog_decides_when_to_dispatch(monkeypatch, lease, last_digest, minutes, utc, expected):
+    monkeypatch.setattr(storage, "lease_holder", lambda: lease)
+    monkeypatch.setattr(storage, "get_state", lambda key: last_digest if key == "last_digest" else {})
+    monkeypatch.setattr(storage, "minutes_since_last_cycle", lambda: minutes)
+    now = datetime.fromisoformat(utc).replace(tzinfo=timezone.utc)
+    assert worker.collector_dispatch_reason(now) == expected
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_github_api_with_job_token(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "dono/repo")
+    monkeypatch.setenv("GITHUB_REF_NAME", "main")
+    seen = {}
+
+    class Response:
+        status_code = 204
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            seen.update(url=url, auth=headers["Authorization"], body=json)
+            return Response()
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    assert await worker.dispatch_collector("teste") is True
+    assert seen["url"].endswith("/repos/dono/repo/actions/workflows/garimpo.yml/dispatches")
+    assert seen["auth"] == "Bearer tok" and seen["body"] == {"ref": "main"}

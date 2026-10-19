@@ -148,6 +148,14 @@ def lease_holder() -> str | None:
     return f"{row['holder'].split(':')[0]} (expira em {row['expira_em_s']}s)" if row else None
 
 
+def minutes_since_last_cycle() -> float | None:
+    """Minutos desde o início do último ciclo de coleta registrado (None se nunca houve)."""
+    with connect() as conn:
+        row = conn.execute("""select extract(epoch from now()-max(started_at))/60 as minutos
+            from public.collection_runs where mode<>'simulation'""").fetchone()
+    return float(row["minutos"]) if row and row["minutos"] is not None else None
+
+
 def source_key(row: dict) -> str:
     explicit = row.get("external_id") or row.get("hash") or row.get("id") or row.get("numeroComunicacao")
     if explicit:
