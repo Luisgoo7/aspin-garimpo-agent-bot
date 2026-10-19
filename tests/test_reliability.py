@@ -648,7 +648,7 @@ async def test_preview_fills_with_fictitious_example_and_marks_nothing(monkeypat
     assert await worker.send_preview() == 0
     texts = [c.args[0] for c in sender.await_args_list]
     assert len(texts) == 4 and "PRÉVIA" in texts[0]
-    assert texts[1].startswith("[PRÉVIA] ASPIN | Oportunidade 1 de 3 — entrega das 12h")
+    assert "PRÉVIA" in texts[1] and "<b>💼 Oportunidade 1/3 · 12h</b>" in texts[1]
     assert all("EXEMPLO FICTÍCIO" in t for t in texts[2:]) and not marked
 
 

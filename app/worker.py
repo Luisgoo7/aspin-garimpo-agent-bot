@@ -14,7 +14,11 @@ from .datajud import DataJudError, collect_expeditions
 from .llm import LLMClassifier, _AMOUNT_CONTEXT_RE, _normalize_amount
 from .opportunity import KEYWORDS, focus_excerpt, max_amount_in_text, canonical_alias, canonical_cnj, clean_text, parse_amount
 from .sources import search_djen, probe_tjsp_pages
-from .telegram_bot import send_alert
+import html as _html
+
+from . import sheets
+from .telegram_bot import (APPROVE, DISCARD, TelegramError, answer_callback, decided_keyboard,
+                           decision_keyboard, get_updates, send_alert, send_message, set_buttons)
 from .source_retry import recover_queries
 from . import storage
 
@@ -165,6 +169,167 @@ def format_alert(opp: dict, position: int | None = None, total: int | None = Non
         "Revisão comercial e jurídica necessária: confirmar situação atual, titularidade, cessões e disponibilidade. Comissão é estimativa, não retorno garantido.",
     ]
     return "\n".join(lines)[:4000]
+
+
+def format_alert_compact(opp: dict, position: int | None = None, total: int | None = None,
+                         slot: datetime | None = None) -> str:
+    """Notificação enxuta (HTML). Os detalhes completos vão para a planilha ao aprovar."""
+    e = _html.escape
+    result = opp.get("classification") or {}
+    tribunal = str(opp.get("alias") or "").removeprefix("api_publica_").upper() or "Tribunal n/i"
+    tipo = {"oficio_requisitorio": "Ofício requisitório", "precatorio": "Precatório", "rpv": "RPV"}.get(
+        opp.get("requisition_type"), "Requisição")
+    title = "💼 Oportunidade"
+    if position and total:
+        title += f" {position}/{total}"
+    if slot:
+        title += f" · {slot:%H}h"
+    tags = []
+    if result.get("credit_nature") == "alimentar":
+        tags.append("Alimentar")
+    if result.get("legal_preference"):
+        tags.append(str(result["legal_preference"])[:40])
+    lines = [f"<b>{e(title)}</b>",
+             f"<b>{e(brl(opp['amount']))}</b> · {e(tipo)} · {e(tribunal)}"]
+    if tags:
+        lines.append(e(" · ".join(tags)))
+    lines.append(f"📄 {e(_v(opp.get('cnj_number')))}")
+    credor = _v(opp.get("beneficiary"), "credor n/i")
+    devedor = _v(opp.get("debtor_entity"), "devedor n/i")
+    lines.append(f"👤 {e(credor[:60])} → {e(devedor[:60])}")
+    confidence = f"⭐ Confiança {float(opp.get('potential_score') or 0):.0%}"
+    if opp.get("datajud_signal"):
+        confidence += " · DataJud ✔"
+    lines.append(confidence)
+    if result.get("third_party_interest"):
+        lines.append("⚠️ FIDC/banco citado — verificar cessão")
+    url = opp.get("document_url") or opp.get("source_url")
+    if url and str(url).startswith("http"):
+        lines.append(f'🔗 <a href="{e(str(url), quote=True)}">Ver publicação</a>')
+    return "\n".join(lines)[:4000]
+
+
+def sheet_row(opp: dict) -> dict:
+    """Linha completa da planilha (cabeçalhos iguais aos da aba)."""
+    result = opp.get("classification") or {}
+    amount = float(opp.get("amount") or 0)
+    decided = opp.get("decided_at")
+    decided = decided.astimezone(ZoneInfo(settings.digest_timezone)).strftime("%d/%m/%Y %H:%M") if hasattr(decided, "astimezone") else str(decided or "")
+    tipo = {"oficio_requisitorio": "Ofício requisitório", "precatorio": "Precatório", "rpv": "RPV"}.get(
+        opp.get("requisition_type"), _v(opp.get("requisition_type"), ""))
+    return {
+        "Aprovado em": decided,
+        "Aprovado por": opp.get("decided_by") or "",
+        "Processo": opp.get("cnj_number") or "",
+        "Tribunal": str(opp.get("alias") or "").removeprefix("api_publica_").upper(),
+        "Tipo": tipo,
+        "Nº requisição": result.get("requisition_number") or "",
+        "Valor (R$)": round(amount, 2),
+        "Natureza": {"alimentar": "Alimentar", "comum": "Comum"}.get(result.get("credit_nature"), ""),
+        "Preferência legal": result.get("legal_preference") or "",
+        "Credor": opp.get("beneficiary") or "",
+        "Devedor": opp.get("debtor_entity") or "",
+        "Classe": result.get("process_class") or "",
+        "Órgão julgador": result.get("court_body") or "",
+        "Processo referência": result.get("reference_process") or "",
+        "Assunto": result.get("subject") or "",
+        "Honorários destacados (R$)": result.get("contractual_fees_amount") or "",
+        "Trânsito em julgado": result.get("res_judicata_date") or "",
+        "Terceiro interessado": "Sim — verificar cessão" if result.get("third_party_interest") else "Não citado",
+        "Confiança": f"{float(opp.get('potential_score') or 0):.0%}",
+        "Comissão estimada (R$)": round(amount * settings.aspin_commission_rate, 2),
+        "Confirmado DataJud": "Sim" if opp.get("datajud_signal") else "Não",
+        "Fonte": opp.get("document_url") or opp.get("source_url") or "",
+        "Publicação (trecho)": str(opp.get("text_excerpt") or result.get("evidence_quote") or "")[:1500],
+        "ID interno": str(opp.get("id") or ""),
+    }
+
+
+def _person(user: dict) -> str:
+    name = " ".join(x for x in (user.get("first_name"), user.get("last_name")) if x) or "sem nome"
+    return name + (f" (@{user['username']})" if user.get("username") else "")
+
+
+async def process_buttons() -> dict:
+    """Lê os cliques em Aprovar/Descartar, grava a decisão e envia as aprovadas à planilha."""
+    metrics = {"clicks": 0, "approved": 0, "discarded": 0, "ignored": 0, "sheet_ok": 0, "sheet_failed": 0}
+    approvers = {x.strip() for x in settings.telegram_approvers.split(",") if x.strip()}
+    state = storage.get_state("telegram_updates")
+    offset = state.get("offset")
+    updates = await get_updates(offset)
+    for update in updates:
+        offset = int(update["update_id"]) + 1
+        query = update.get("callback_query") or {}
+        if not query:
+            continue
+        metrics["clicks"] += 1
+        message = query.get("message") or {}
+        chat_id = str((message.get("chat") or {}).get("id", ""))
+        data = str(query.get("data") or "")
+        user = query.get("from") or {}
+        if chat_id != str(settings.telegram_chat_id) or ":" not in data:
+            metrics["ignored"] += 1
+            await answer_callback(query.get("id", ""), "Já decidido.")
+            continue
+        if approvers and str(user.get("id")) not in approvers:
+            metrics["ignored"] += 1
+            await answer_callback(query.get("id", ""), "Você não está autorizado a decidir oportunidades.")
+            continue
+        action, opp_id = data.split(":", 1)
+        if action not in (APPROVE, DISCARD):
+            metrics["ignored"] += 1
+            continue
+        decision = "aprovada" if action == APPROVE else "descartada"
+        who = _person(user)
+        try:
+            created, current = storage.record_decision(opp_id, decision, who)
+        except Exception as exc:
+            log.error("Decisão não gravada: %s", storage.safe_error(exc))
+            offset = int(update["update_id"])  # o clique será reprocessado no próximo ciclo
+            metrics["decision_db_error"] = storage.safe_error(exc)
+            break
+        if current is None:
+            metrics["ignored"] += 1
+            await answer_callback(query.get("id", ""), "Oportunidade não encontrada.")
+            continue
+        final = current.get("decision")
+        by = current.get("decided_by") or who
+        label = ("✅ Aprovado por " if final == "aprovada" else "❌ Descartado por ") + by.split(" (")[0]
+        await answer_callback(query.get("id", ""), label if created else f"Já decidido: {label}")
+        try:
+            await set_buttons(chat_id, message.get("message_id"), decided_keyboard(label))
+        except TelegramError as exc:
+            log.warning("Botões não atualizados: %s", exc)
+        if created:
+            metrics["approved" if decision == "aprovada" else "discarded"] += 1
+    if updates:
+        storage.set_state("telegram_updates", {"offset": offset})
+    await sync_sheet(metrics)
+    return metrics
+
+
+async def sync_sheet(metrics: dict) -> None:
+    """Fila de saída: toda aprovação ainda não gravada na planilha é (re)enviada."""
+    if not sheets.configured():
+        pending = storage.sheet_outbox(1000)
+        metrics["sheet_pending"] = len(pending)
+        if pending:
+            metrics["sheet_not_configured"] = True
+        return
+    for opp in storage.sheet_outbox(50):
+        try:
+            opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+        except Exception:
+            opp["datajud_signal"] = None
+        try:
+            await sheets.append_row(sheet_row(opp))
+            storage.mark_sheet(opp["id"])
+            metrics["sheet_ok"] += 1
+        except sheets.SheetsError as exc:
+            storage.mark_sheet(opp["id"], str(exc))
+            metrics["sheet_failed"] += 1
+            metrics["sheet_error"] = str(exc)
+            break
 
 
 def _datajud_line(opp: dict) -> str:
@@ -465,8 +630,13 @@ async def _send_pending_alerts(metrics: dict, errors: list[str], opportunities: 
                 except Exception:
                     opp["datajud_signal"] = None
             total = settings.digest_top_n if slot else None
-            await send_alert(format_alert(opp, index if slot else None, total, slot))
+            sent = await send_message(format_alert_compact(opp, index if slot else None, total, slot),
+                                      decision_keyboard(opp["id"]), html=True)
             storage.mark_alerted(opp["id"])
+            try:
+                storage.set_telegram_message(opp["id"], sent["chat_id"], sent["message_id"])
+            except Exception as exc:
+                log.warning("message_id não gravado: %s", storage.safe_error(exc))
             metrics["alerts"] += 1
         except Exception as exc:
             reason = str(exc) if str(exc).startswith("Telegram") else storage.safe_error(exc)
@@ -651,12 +821,47 @@ async def send_preview() -> int:
     total = settings.digest_top_n
     for index in range(1, total + 1):
         if index <= real:
-            text = "[PRÉVIA] " + format_alert(best[index - 1], index, total, slot)
+            opp = best[index - 1]
+            text = "🔎 <i>PRÉVIA</i>\n" + format_alert_compact(opp, index, total, slot)
+            sent = await send_message(text, decision_keyboard(opp["id"]), html=True)
+            try:
+                storage.set_telegram_message(opp["id"], sent["chat_id"], sent["message_id"])
+            except Exception as exc:
+                log.warning("message_id não gravado: %s", storage.safe_error(exc))
         else:
-            text = "[EXEMPLO FICTÍCIO — dados inventados] " + format_alert(dict(EXAMPLE_OPPORTUNITY), index, total, slot)
-        await send_alert(text[:4000])
+            text = "🧪 <i>EXEMPLO FICTÍCIO — sem botões</i>\n" + format_alert_compact(dict(EXAMPLE_OPPORTUNITY), index, total, slot)
+            await send_message(text, html=True)
     print(f"Prévia enviada: {real} reais + {total - min(real, total)} exemplo(s)")
     return EXIT_OK
+
+
+def buttons_exit_code(result: dict) -> int:
+    """Falha da planilha é tolerada (a aprovação fica na fila); vermelho só se persistir."""
+    state = storage.get_state("sheet_failures")
+    if result.get("sheet_failed"):
+        streak = int(state.get("streak", 0)) + 1
+        storage.set_state("sheet_failures", {"streak": streak, "error": result.get("sheet_error")})
+        if streak >= settings.sheet_failure_streak_to_alert:
+            log.error("Planilha falhou %s vezes seguidas: %s", streak, result.get("sheet_error"))
+            return EXIT_DELIVERY_FAILED
+    elif state:
+        storage.set_state("sheet_failures", {})
+    return EXIT_OK
+
+
+def write_buttons_summary(result: dict) -> None:
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    lines = ["## Botões Aprovar/Descartar", "", "| Métrica | Valor |", "|---|---|"]
+    lines += [f"| {k} | {v} |" for k, v in result.items()]
+    if result.get("sheet_not_configured"):
+        lines += ["", "> Planilha ainda não configurada: as aprovações estão guardadas no banco e serão enviadas assim que SHEETS_WEBHOOK_URL e SHEETS_TOKEN existirem."]
+    try:
+        with open(path, "a", encoding="utf-8") as out:
+            out.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
 
 
 def write_summary(result: dict | None, failure: str | None = None):
@@ -699,11 +904,19 @@ def main():
     parser.add_argument("--lookback-minutes", type=int)
     parser.add_argument("--simulate-failure", choices=SIMULATIONS, help="falha deliberada para validar o caminho de erro")
     parser.add_argument("--send-preview", action="store_true", help="envia ao canal uma prévia da entrega das 12h")
+    parser.add_argument("--process-buttons", action="store_true", help="processa cliques Aprovar/Descartar e grava na planilha")
     args = parser.parse_args()
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     if args.simulate_failure:
         settings.simulate_failure = args.simulate_failure
     try:
+        if args.process_buttons:
+            require_configuration()
+            storage.ensure_schema()
+            result = asyncio.run(process_buttons())
+            print(json.dumps(result, ensure_ascii=False))
+            write_buttons_summary(result)
+            return buttons_exit_code(result)
         if args.send_preview:
             require_configuration()
             return asyncio.run(send_preview())
