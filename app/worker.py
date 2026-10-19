@@ -121,10 +121,6 @@ def nota_aspin(opp: dict) -> tuple[int, list[tuple[str, str, bool, int]]]:
     return sum(weight for _, _, ok, weight in items if ok), items
 
 
-NOTA_SHORT = {"valor": "valor", "expedido": "expedido", "datajud": "DataJud",
-              "sem_cessao": "sem cessão", "alimentar": "alimentar", "preferencia": "preferência"}
-
-
 def rank_score(opp: dict) -> float:
     """Valor esperado do crédito para a ASPIN, usado para escolher as 3 melhores.
 
@@ -231,9 +227,8 @@ def format_alert_compact(opp: dict, position: int | None = None, total: int | No
     credor = _v(opp.get("beneficiary"), "credor n/i")
     devedor = _v(opp.get("debtor_entity"), "devedor n/i")
     lines.append(f"👤 {e(credor[:60])} → {e(devedor[:60])}")
-    nota, items = nota_aspin(opp)
-    lines.append(f"⭐ <b>Nota ASPIN {nota}/10</b> · IA {float(opp.get('potential_score') or 0):.0%}")
-    lines.append(" · ".join(("✅ " if ok else "▫️ ") + NOTA_SHORT[key] for key, _, ok, _ in items))
+    nota, _ = nota_aspin(opp)
+    lines.append(f"⭐ <b>Nota ASPIN {nota}/10</b>")
     if result.get("third_party_interest"):
         lines.append("⚠️ FIDC/banco citado — verificar cessão")
     url = opp.get("document_url") or opp.get("source_url")
