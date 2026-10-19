@@ -7,3 +7,4 @@ python-telegram-bot==21.10
 psycopg[binary]==3.2.3
 nanojud==0.5.1
 pydatajud==0.1.1
+tzdata==2025.2

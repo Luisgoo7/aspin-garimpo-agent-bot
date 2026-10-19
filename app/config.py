@@ -41,14 +41,22 @@ class Settings(BaseSettings):
     enable_djen: bool = True
     enable_tjsp_probe: bool = True
     poll_interval_minutes: int = Field(default=60, ge=5)
-    status_interval_minutes: int = Field(default=120, ge=5)
+    status_interval_minutes: int = Field(default=360, ge=5)
+    # "failures": o canal só recebe status quando o coletor falha; "always": resumo periódico.
+    status_telegram: str = "failures"
+    # Entrega: só as N melhores, nestes horários locais.
+    digest_hours: str = "8,12,18"
+    digest_timezone: str = "America/Sao_Paulo"
+    digest_top_n: int = Field(default=3, ge=1, le=20)
+    failure_streak_to_alert: int = Field(default=3, ge=1, le=48)
+    digest_max_delay_minutes: int = Field(default=180, ge=10, le=720)
     initial_lookback_days: int = Field(default=7, ge=1, le=30)
     incremental_lookback_minutes: int = Field(default=120, ge=1)
     min_confidence: float = Field(default=0.78, ge=0, le=1)
     min_opportunity_amount: float = Field(default=100000, ge=0)
     aspin_commission_rate: float = Field(default=0.05, ge=0, le=1)
     datajud_page_size: int = Field(default=100, ge=1, le=1000)
-    max_classify_per_cycle: int = Field(default=120, ge=1, le=1000)
+    max_classify_per_cycle: int = Field(default=25, ge=1, le=1000)
     djen_page_size: int = Field(default=50, ge=1, le=100)
     djen_max_pages: int = Field(default=10, ge=1, le=200)
     djen_max_documents: int = Field(default=2500, ge=1, le=20000)

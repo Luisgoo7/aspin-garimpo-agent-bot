@@ -269,8 +269,17 @@ def pending_alerts(limit: int = 120) -> list[dict]:
             from public.opportunities o join public.processes p on p.id=o.process_id
             join public.tribunals t on t.id=p.tribunal_id left join public.evidence e on e.id=o.evidence_id
             where o.alerted_at is null and o.potential_score>=%s and o.amount>=%s
-            and o.status='new' order by o.created_at limit %s""",
+            and o.status='new' order by o.amount*o.potential_score desc, o.potential_score desc, o.created_at limit %s""",
             (settings.min_confidence, settings.min_opportunity_amount, limit)).fetchall()
+
+
+def archive_unselected(selected_ids: list, cutoff) -> int:
+    """Candidatas da janela que não ficaram entre as melhores: guardadas, não enviadas."""
+    with connect() as conn:
+        cur = conn.execute("""update public.opportunities set status='nao_selecionada'
+            where alerted_at is null and status in ('new','review') and created_at<=%s
+            and not (id = any(%s))""", (cutoff, [str(x) for x in selected_ids] or ["00000000-0000-0000-0000-000000000000"]))
+        return cur.rowcount
 
 
 def mark_alerted(opp_id):

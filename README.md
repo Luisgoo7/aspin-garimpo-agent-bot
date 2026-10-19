@@ -13,7 +13,10 @@ MVP para localizar eventos processuais relacionados a ofícios requisitórios, R
 
 ## Status
 
-Esqueleto de produção criado. Para ativar são necessários: projeto Supabase, credenciais da Oracle, token do BotFather e chaves Groq/Gemini.
+Coletor em produção via GitHub Actions (DataJud + IA + Telegram) com estados de
+falha explícitos. Leia [docs/OPERACAO.md](docs/OPERACAO.md) para interpretar cada
+execução, simular falhas e ver os passos pendentes (DJEN exige servidor no Brasil).
+Estudo das plataformas pagas: [docs/ESTUDO_CONCORRENTES.md](docs/ESTUDO_CONCORRENTES.md).
 
 ## Configuração
 

@@ -2,7 +2,8 @@ name: Garimpo ASPIN
 
 on:
   schedule:
-    - cron: '5 * * * *'
+    - cron: '5 * * * *'          # coleta de hora em hora
+    - cron: '0 11,15,21 * * *'   # 08h, 12h e 18h em Brasília: entrega das 3 melhores
   workflow_dispatch:
     inputs:
       lookback_minutes:
@@ -78,10 +79,13 @@ jobs:
       MIN_OPPORTUNITY_AMOUNT: '100000'
       ASPIN_COMMISSION_RATE: '0.05'
       POLL_INTERVAL_MINUTES: '60'
-      STATUS_INTERVAL_MINUTES: '120'
+      STATUS_INTERVAL_MINUTES: '360'
       INITIAL_LOOKBACK_DAYS: '7'
       INCREMENTAL_LOOKBACK_MINUTES: '120'
-      MAX_CLASSIFY_PER_CYCLE: '120'
+      MAX_CLASSIFY_PER_CYCLE: '25'
+      DIGEST_HOURS: '8,12,18'
+      DIGEST_TOP_N: '3'
+      STATUS_TELEGRAM: failures
       DJEN_PAGE_SIZE: '100'
       DJEN_MAX_PAGES: '30'
       DJEN_MAX_DOCUMENTS: '8000'

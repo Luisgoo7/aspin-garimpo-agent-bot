@@ -7,6 +7,7 @@ import time
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from .config import settings
 from .datajud import DataJudError, collect_expeditions
@@ -153,6 +154,8 @@ def status_message(metrics: dict, errors: list[str]) -> str:
 
 
 async def maybe_send_status(metrics: dict, errors: list[str]):
+    if settings.status_telegram != "always" and metrics.get("outcome") not in ("source_failed", "ai_failed", "alert_failed"):
+        return  # canal recebe só as melhores oportunidades; status apenas em falha
     now = datetime.now(timezone.utc)
     last = storage.get_state("last_status")
     try:
@@ -259,8 +262,96 @@ async def _process_queue(metrics: dict, errors: list[str]):
             log.error("Documento pendente para nova tentativa: %s", error)
 
 
-async def _send_pending_alerts(metrics: dict, errors: list[str]):
-    for opp in storage.pending_alerts(settings.max_classify_per_cycle):
+FAILURE_OUTCOMES = ("source_failed", "ai_failed", "alert_failed")
+
+
+def apply_failure_streak(outcome: str, metrics: dict) -> str:
+    """Falha passageira (fonte fora, IA em limite, Telegram instável) vira partial e
+    é refeita no próximo ciclo; só fica vermelho quando a mesma falha se repete em
+    FAILURE_STREAK_TO_ALERT ciclos seguidos, ou numa simulação deliberada."""
+    state = storage.get_state("failure_streak")
+    if outcome not in FAILURE_OUTCOMES:
+        if state:
+            storage.set_state("failure_streak", {})
+        return outcome
+    if settings.simulate_failure:
+        return outcome
+    streak = int(state.get(outcome, 0)) + 1
+    storage.set_state("failure_streak", {outcome: streak})
+    metrics["failure_streak"] = streak
+    if streak < settings.failure_streak_to_alert:
+        metrics["falha_transitoria"] = outcome
+        return "partial"
+    return outcome
+
+
+def digest_slot_due(now: datetime) -> datetime | None:
+    """Horário de entrega (08/12/18h locais) mais recente ainda dentro da tolerância de atraso."""
+    tz = ZoneInfo(settings.digest_timezone)
+    local = now.astimezone(tz)
+    hours = sorted({int(h) for h in settings.digest_hours.split(",") if h.strip()})
+    candidates = [datetime.combine(local.date() - timedelta(days=d), datetime.min.time(), tz).replace(hour=h)
+                  for d in (0, 1) for h in hours]
+    past = [slot for slot in candidates if slot <= local]
+    if not past:
+        return None
+    slot = max(past)
+    if (local - slot).total_seconds() > settings.digest_max_delay_minutes * 60:
+        return None
+    return slot
+
+
+def digest_message_empty(slot: datetime, metrics: dict) -> str:
+    return (f"ASPIN | Entrega das {slot:%H:%M} ({slot:%d/%m})\n\n"
+            "Nenhuma oportunidade passou nos critérios nesta janela "
+            f"(confiança ≥ {settings.min_confidence:.0%} e valor ≥ {brl(settings.min_opportunity_amount)}).\n"
+            "Isto não significa ausência de créditos no mercado; a coleta continua a cada hora.")
+
+
+async def _deliver_digest(metrics: dict, errors: list[str], now: datetime | None = None):
+    """Envia só as N melhores da janela, nos horários configurados.
+
+    Se o envio falhar, o horário não é dado como entregue e o próximo ciclo
+    (de hora em hora) tenta de novo dentro da tolerância; nada é enviado duas
+    vezes porque cada oportunidade enviada recebe alerted_at.
+    """
+    now = now or datetime.now(timezone.utc)
+    slot = digest_slot_due(now)
+    if slot is None:
+        metrics["digest"] = "fora_do_horario"
+        return
+    key = slot.isoformat()
+    if storage.get_state("last_digest").get("slot") == key:
+        metrics["digest"] = "ja_entregue"
+        return
+    # Progresso do horário: se o envio caiu no meio, a nova tentativa manda só o que falta.
+    progress = storage.get_state("digest_progress")
+    sent_ids = list(progress.get("sent_ids", [])) if progress.get("slot") == key else []
+    best = storage.pending_alerts(max(0, settings.digest_top_n - len(sent_ids))) if len(sent_ids) < settings.digest_top_n else []
+    if not best and not sent_ids:
+        if simulated("telegram"):
+            raise RuntimeError("Telegram: falha simulada")
+        await send_alert(digest_message_empty(slot, metrics))
+    elif best:
+        before = metrics.get("alerts", 0)
+        await _send_pending_alerts(metrics, errors, best)
+        sent_ids += [str(o["id"]) for o in best[:metrics.get("alerts", 0) - before]]
+        if metrics.get("alerts_failed"):
+            storage.set_state("digest_progress", {"slot": key, "sent_ids": sent_ids})
+            metrics["digest"] = "envio_pendente"
+            return
+    archived = storage.archive_unselected(sent_ids, now)
+    storage.set_state("last_digest", {"slot": key, "sent": len(sent_ids), "archived": archived, "at": now.isoformat()})
+    storage.set_state("digest_progress", {})
+    metrics["digest"] = "entregue"
+    metrics["digest_sent"] = len(sent_ids)
+    metrics["digest_archived"] = archived
+
+
+async def _send_pending_alerts(metrics: dict, errors: list[str], opportunities: list[dict] | None = None):
+    if opportunities is None:
+        opportunities = storage.pending_alerts(settings.max_classify_per_cycle)
+    for opp in opportunities:
         try:
             if simulated("telegram"):
                 raise RuntimeError("Telegram: falha simulada")
@@ -345,9 +436,14 @@ async def run_cycle(lookback_minutes: int | None = None) -> dict:
             with timed(metrics, "ia"):
                 await _process_queue(metrics, errors)
             with timed(metrics, "telegram"):
-                await _send_pending_alerts(metrics, errors)
+                try:
+                    await _deliver_digest(metrics, errors)
+                except Exception as exc:
+                    reason = str(exc) if str(exc).startswith("Telegram") else storage.safe_error(exc)
+                    errors.append("telegram: " + reason)
+                    metrics["alerts_failed"] = metrics.get("alerts_failed", 0) + 1
             metrics["queue"] = storage.queue_counts()
-            outcome = decide_outcome(metrics, errors)
+            outcome = apply_failure_streak(decide_outcome(metrics, errors), metrics)
             metrics["outcome"] = outcome
             try:
                 await maybe_send_status(metrics, errors)

@@ -1,6 +1,6 @@
 import asyncio
 import os
-from datetime import date
+from datetime import date, datetime, timezone
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -212,15 +212,17 @@ async def test_end_to_end_real_database_mocked_external_services(test_db, monkey
     monkeypatch.setattr(worker, "search_djen", AsyncMock(return_value=batch))
     monkeypatch.setattr(worker.LLMClassifier, "classify", AsyncMock(return_value=positive()))
     sender = AsyncMock()
+    from datetime import datetime as _dt, timezone as _tz
+    monkeypatch.setattr(worker, "digest_slot_due", lambda now: _dt(2026, 10, 19, 12, tzinfo=_tz.utc))
     monkeypatch.setattr(worker, "send_alert", sender)
     result = await worker.run_cycle(120)
     assert result["outcome"] == "success"
     assert result["opportunities"] == 1 and result["alerts"] == 1
-    assert sender.await_count == 2  # candidato + status inicial
+    assert sender.await_count == 1  # só a oportunidade; status vai ao canal apenas em falha
     assert storage.pending_alerts() == []
     result2 = await worker.run_cycle(120)
     assert result2["opportunities"] == 0 and result2["alerts"] == 0
-    assert sender.await_count == 2  # sem duplicar nem repetir status fora do intervalo
+    assert sender.await_count == 1  # mesmo horário de entrega: nada reenviado
 
 
 def test_existing_unalerted_record_can_be_enriched(test_db):
@@ -249,3 +251,17 @@ async def test_below_minimum_document_does_not_call_ai(monkeypatch):
     assert finished==['below_minimum']
     assert metrics['below_minimum']==1 and metrics['classified']==0
     classifier.assert_not_awaited()
+
+
+
+def test_pending_alerts_are_ranked_by_expected_value(test_db):
+    storage.upsert_document(source_row())
+    doc = storage.claim_document()
+    low = dict(positive(), amount=150000.0, potential_score=0.95, requisition_type="rpv")
+    high = dict(positive(), amount=900000.0, potential_score=0.80)
+    storage.save_opportunity(doc, low)
+    storage.save_opportunity(doc, high)
+    ranked = storage.pending_alerts(3)
+    assert [float(o["amount"]) for o in ranked] == [900000.0, 150000.0]
+    archived = storage.archive_unselected([ranked[0]["id"]], datetime.now(timezone.utc))
+    assert archived == 1 and len(storage.pending_alerts(3)) == 1

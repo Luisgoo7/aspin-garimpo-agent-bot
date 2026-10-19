@@ -314,6 +314,7 @@ async def test_simulated_djen_failure_is_recorded_as_error_not_zero(monkeypatch)
     monkeypatch.setattr(storage, "pending_alerts", lambda limit: [])
     monkeypatch.setattr(storage, "queue_counts", lambda: {})
     monkeypatch.setattr(worker, "send_alert", AsyncMock())
+    monkeypatch.setattr(worker, "digest_slot_due", lambda now: None)
     result = await worker.run_cycle(60)
     assert result["outcome"] == "source_failed" and recorded["outcome"] == "source_failed"
     assert recorded["mode"] == "simulation"
@@ -386,3 +387,136 @@ async def test_long_429_switches_provider_and_pauses_it(monkeypatch):
 def test_djen_can_be_disabled_without_counting_as_failure():
     metrics = base_metrics(djen_pages=0, djen_disabled=True)
     assert worker.decide_outcome(metrics, []) == "success"
+
+
+
+# ---------- entrega: só as 3 melhores às 08/12/18h ----------
+
+from datetime import datetime, timezone
+
+
+@pytest.mark.parametrize("utc,expected", [
+    ("2026-10-19T11:05:00", "08:00"),   # 08:05 em Brasília
+    ("2026-10-19T13:30:00", "08:00"),   # 10:30, ainda dentro da tolerância de 3h
+    ("2026-10-19T14:30:00", None),      # 11:30, 08h expirou e 12h não chegou
+    ("2026-10-19T15:00:00", "12:00"),
+    ("2026-10-19T21:59:00", "18:00"),
+    ("2026-10-20T02:00:00", None),      # 23h
+    ("2026-10-19T10:59:00", None),      # 07:59
+])
+def test_digest_slots_in_brasilia_time(utc, expected):
+    slot = worker.digest_slot_due(datetime.fromisoformat(utc).replace(tzinfo=timezone.utc))
+    assert (slot.strftime("%H:%M") if slot else None) == expected
+
+
+class DigestStore:
+    def __init__(self, opps):
+        self.opps = opps
+        self.state = {}
+        self.marked = []
+        self.archived = None
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(storage, "get_state", lambda key: self.state.get(key, {}))
+        monkeypatch.setattr(storage, "set_state", lambda key, value: self.state.__setitem__(key, value))
+        monkeypatch.setattr(storage, "pending_alerts", lambda limit: [o for o in self.ranked() if o["id"] not in self.marked][:limit])
+        monkeypatch.setattr(storage, "mark_alerted", self.marked.append)
+        monkeypatch.setattr(storage, "datajud_signal", lambda cnj: None)
+        monkeypatch.setattr(storage, "archive_unselected", lambda ids, cutoff: setattr(self, "archived", list(ids)) or len(self.opps) - len(ids))
+
+    def ranked(self):
+        return sorted(self.opps, key=lambda o: o["amount"] * o["potential_score"], reverse=True)
+
+
+def opp(i, amount, score):
+    return {"id": f"o{i}", "amount": amount, "potential_score": score, "classification": {}, "alias": "api_publica_trf3"}
+
+
+SLOT_TIME = datetime(2026, 10, 19, 15, 5, tzinfo=timezone.utc)  # 12:05 em Brasília
+
+
+@pytest.mark.asyncio
+async def test_digest_sends_only_top_three_once(monkeypatch):
+    store = DigestStore([opp(i, 100000 * (i + 1), 0.8 + i * 0.01) for i in range(10)])
+    store.install(monkeypatch)
+    sender = AsyncMock()
+    monkeypatch.setattr(worker, "send_alert", sender)
+    metrics = {"alerts": 0}
+    await worker._deliver_digest(metrics, [], SLOT_TIME)
+    assert sender.await_count == 3 and store.marked == ["o9", "o8", "o7"]
+    assert metrics["digest"] == "entregue" and store.archived == ["o9", "o8", "o7"]
+    await worker._deliver_digest(metrics, [], SLOT_TIME.replace(minute=50))
+    assert sender.await_count == 3 and metrics["digest"] == "ja_entregue"
+
+
+@pytest.mark.asyncio
+async def test_digest_waits_outside_delivery_hours(monkeypatch):
+    store = DigestStore([opp(1, 500000, 0.9)])
+    store.install(monkeypatch)
+    sender = AsyncMock()
+    monkeypatch.setattr(worker, "send_alert", sender)
+    metrics = {"alerts": 0}
+    await worker._deliver_digest(metrics, [], datetime(2026, 10, 19, 20, 0, tzinfo=timezone.utc))  # 17h: 12h já expirou, 18h não chegou
+    assert sender.await_count == 0 and metrics["digest"] == "fora_do_horario"
+
+
+@pytest.mark.asyncio
+async def test_digest_telegram_failure_retries_next_hour_without_duplicates(monkeypatch):
+    store = DigestStore([opp(i, 200000, 0.9) for i in range(5)])
+    store.install(monkeypatch)
+    calls = []
+
+    async def flaky(text):
+        calls.append(text)
+        if len(calls) == 2:
+            raise RuntimeError("Telegram HTTP 502: envio não confirmado")
+    monkeypatch.setattr(worker, "send_alert", flaky)
+    metrics = {"alerts": 0}
+    errors = []
+    await worker._deliver_digest(metrics, errors, SLOT_TIME)
+    assert metrics["digest"] == "envio_pendente" and len(store.marked) == 1 and store.archived is None
+    metrics2 = {"alerts": 0}
+    await worker._deliver_digest(metrics2, [], SLOT_TIME.replace(hour=16))  # próximo ciclo, 13h
+    assert metrics2["digest"] == "entregue" and len(store.marked) == 3 and len(set(store.marked)) == 3
+
+
+@pytest.mark.asyncio
+async def test_digest_without_candidates_sends_single_notice(monkeypatch):
+    store = DigestStore([])
+    store.install(monkeypatch)
+    sender = AsyncMock()
+    monkeypatch.setattr(worker, "send_alert", sender)
+    metrics = {"alerts": 0}
+    await worker._deliver_digest(metrics, [], SLOT_TIME)
+    assert sender.await_count == 1 and "Nenhuma oportunidade" in sender.await_args.args[0]
+
+
+def test_transient_failure_is_partial_until_it_repeats(monkeypatch):
+    state = {}
+    monkeypatch.setattr(storage, "get_state", lambda key: state.get(key, {}))
+    monkeypatch.setattr(storage, "set_state", lambda key, value: state.__setitem__(key, value))
+    monkeypatch.setattr(settings, "simulate_failure", "")
+    outcomes = [worker.apply_failure_streak("ai_failed", {}) for _ in range(3)]
+    assert outcomes == ["partial", "partial", "ai_failed"]
+    assert worker.apply_failure_streak("success", {}) == "success" and state["failure_streak"] == {}
+    assert worker.apply_failure_streak("ai_failed", {}) == "partial"
+
+
+def test_simulation_is_always_reported_as_failure(monkeypatch):
+    monkeypatch.setattr(storage, "get_state", lambda key: {})
+    monkeypatch.setattr(storage, "set_state", lambda key, value: None)
+    monkeypatch.setattr(settings, "simulate_failure", "djen")
+    assert worker.apply_failure_streak("source_failed", {}) == "source_failed"
+
+
+@pytest.mark.asyncio
+async def test_status_goes_to_channel_only_on_failure(monkeypatch):
+    sender = AsyncMock()
+    monkeypatch.setattr(worker, "send_alert", sender)
+    monkeypatch.setattr(storage, "get_state", lambda key: {})
+    monkeypatch.setattr(storage, "set_state", lambda key, value: None)
+    await worker.maybe_send_status({"outcome": "success", "queue": {}}, [])
+    await worker.maybe_send_status({"outcome": "partial", "queue": {}}, ["x"])
+    assert sender.await_count == 0
+    await worker.maybe_send_status({"outcome": "source_failed", "queue": {}}, ["djen_http_403"])
+    assert sender.await_count == 1
