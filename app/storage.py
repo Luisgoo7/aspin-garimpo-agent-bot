@@ -26,7 +26,7 @@ def Jsonb(value):
     """JSONB tolerante a datetime/Decimal: métrica com tipo inesperado não derruba o ciclo."""
     return _Jsonb(value, dumps=_dumps)
 APP_NAME = "aspin-garimpo-" + ("actions" if os.environ.get("GITHUB_ACTIONS") else "worker")
-MIGRATIONS = ("001_initial_schema.sql", "002_sources_and_runs.sql", "003_reliable_processing.sql", "004_prefilter_and_signals.sql")
+MIGRATIONS = ("001_initial_schema.sql", "002_sources_and_runs.sql", "003_reliable_processing.sql", "004_prefilter_and_signals.sql", "005_decisions.sql")
 
 
 class DatabaseUnavailable(RuntimeError):
@@ -318,7 +318,7 @@ def pending_alerts(limit: int = 120) -> list[dict]:
             from public.opportunities o join public.processes p on p.id=o.process_id
             join public.tribunals t on t.id=p.tribunal_id left join public.evidence e on e.id=o.evidence_id
             where o.alerted_at is null and o.potential_score>=%s and o.amount>=%s
-            and o.status='new' order by o.amount*o.potential_score desc, o.potential_score desc, o.created_at limit %s""",
+            and o.status='new' and o.decision is null order by o.amount*o.potential_score desc, o.potential_score desc, o.created_at limit %s""",
             (settings.min_confidence, settings.min_opportunity_amount, limit)).fetchall()
 
 
@@ -329,6 +329,41 @@ def archive_unselected(selected_ids: list, cutoff) -> int:
             where alerted_at is null and status in ('new','review') and created_at<=%s
             and not (id = any(%s))""", (cutoff, [str(x) for x in selected_ids] or ["00000000-0000-0000-0000-000000000000"]))
         return cur.rowcount
+
+
+OPPORTUNITY_FULL_SQL = """select o.*,p.cnj_number,p.source_url,t.alias,e.text_excerpt,e.document_url
+    from public.opportunities o join public.processes p on p.id=o.process_id
+    join public.tribunals t on t.id=p.tribunal_id left join public.evidence e on e.id=o.evidence_id"""
+
+
+def set_telegram_message(opp_id, chat_id, message_id) -> None:
+    with connect() as conn:
+        conn.execute("update public.opportunities set telegram_chat_id=%s,telegram_message_id=%s where id=%s",
+                     (str(chat_id), message_id, opp_id))
+
+
+def record_decision(opp_id: str, decision: str, by: str) -> tuple[bool, dict | None]:
+    """Grava a decisão uma única vez. (True, linha) se gravou agora; (False, linha) se já havia decisão."""
+    with connect() as conn:
+        row = conn.execute("""update public.opportunities set decision=%s,decided_by=%s,decided_at=now(),
+            status=%s where id=%s and decision is null returning id""",
+            (decision, by[:120], "aprovada" if decision == "aprovada" else "descartada", opp_id)).fetchone()
+        current = conn.execute(OPPORTUNITY_FULL_SQL + " where o.id=%s", (opp_id,)).fetchone()
+        return bool(row), current
+
+
+def sheet_outbox(limit: int = 50) -> list[dict]:
+    with connect() as conn:
+        return conn.execute(OPPORTUNITY_FULL_SQL + """ where o.decision='aprovada' and o.sheet_synced_at is null
+            order by o.decided_at limit %s""", (limit,)).fetchall()
+
+
+def mark_sheet(opp_id, error: str | None = None) -> None:
+    with connect() as conn:
+        if error:
+            conn.execute("update public.opportunities set sheet_error=%s where id=%s", (error[:200], opp_id))
+        else:
+            conn.execute("update public.opportunities set sheet_synced_at=now(),sheet_error=null where id=%s", (opp_id,))
 
 
 def mark_alerted(opp_id):

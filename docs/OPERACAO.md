@@ -39,6 +39,20 @@ numa simulação deliberada.
   o que faltou (nunca duplica).
 - Resumos de status só vão ao canal quando o coletor falha de verdade.
 
+## Botões Aprovar/Descartar e planilha
+
+- Cada oportunidade chega enxuta no Telegram (valor, tipo, tribunal, processo,
+  credor → devedor, confiança) com os botões **✅ Aprovar** e **❌ Descartar**.
+- O workflow **Botões Telegram** roda a cada 5 min: grava a decisão no banco,
+  troca os botões por "✅ Aprovado por Fulano" e envia as aprovadas para a planilha
+  [ASPIN Garimpo — Oportunidades Aprovadas](https://docs.google.com/spreadsheets/d/15EG95-C-36Z3Ejb0Ag7IIubAiH-_GvXzPfDg4fWEy-8/edit)
+  com todos os detalhes (requisição, natureza, preferência, honorários, trânsito em julgado, fonte...).
+- Vale a primeira decisão; cliques repetidos não duplicam nada.
+- Se a planilha estiver fora do ar, a aprovação fica guardada no banco e é reenviada
+  a cada 5 min. O run só fica vermelho após 3 falhas seguidas da planilha.
+- Para restringir quem pode decidir, crie a variável `TELEGRAM_APPROVERS` com os IDs
+  numéricos do Telegram separados por vírgula.
+
 ## Testar o caminho de erro (falha simulada)
 
 Actions → **Garimpo ASPIN** → **Run workflow** → em `simulate_failure` escolha

@@ -291,3 +291,20 @@ def test_positive_without_type_or_quote_is_still_saved(test_db):
     result = dict(positive(), requisition_type=None, evidence_quote="")
     opp_id, created = storage.save_opportunity(doc, result)
     assert created and opp_id
+
+
+def test_decision_is_recorded_once_and_feeds_sheet_outbox(test_db):
+    storage.upsert_document(source_row())
+    doc = storage.claim_document()
+    opp_id, _ = storage.save_opportunity(doc, positive())
+    storage.set_telegram_message(opp_id, "-100123", 55)
+    created, row = storage.record_decision(opp_id, "aprovada", "Ana")
+    again, row2 = storage.record_decision(opp_id, "descartada", "Bruno")
+    assert created and not again and row2["decision"] == "aprovada" and row2["decided_by"] == "Ana"
+    assert row["telegram_message_id"] == 55 and row["cnj_number"]
+    assert storage.pending_alerts() == []  # decidida não volta para a entrega
+    assert [o["id"] for o in storage.sheet_outbox()] == [opp_id]
+    storage.mark_sheet(opp_id, "planilha: HTTP 500")
+    assert len(storage.sheet_outbox()) == 1
+    storage.mark_sheet(opp_id)
+    assert storage.sheet_outbox() == []
