@@ -650,3 +650,23 @@ async def test_preview_fills_with_fictitious_example_and_marks_nothing(monkeypat
     assert len(texts) == 4 and "PRÉVIA" in texts[0]
     assert texts[1].startswith("[PRÉVIA] ASPIN | Oportunidade 1 de 3 — entrega das 12h")
     assert all("EXEMPLO FICTÍCIO" in t for t in texts[2:]) and not marked
+
+
+@pytest.mark.asyncio
+async def test_slow_ai_call_never_exceeds_cycle_deadline(monkeypatch):
+    doc = {"id": "d", "processing_attempts": 1, "source": "djen", "raw_data": {},
+           "text_excerpt": "Expeça-se ofício requisitório de R$ 300.000,00"}
+    docs = iter([doc, None])
+    finished = []
+    monkeypatch.setattr(storage, "claim_document", lambda: next(docs))
+    monkeypatch.setattr(storage, "finish_document", lambda d, status, *a, **k: finished.append((status, k.get("error"))))
+
+    async def slow(text):
+        await asyncio.sleep(10)
+    monkeypatch.setattr(worker.LLMClassifier, "classify", lambda self, text: slow(text))
+    monkeypatch.setattr(settings, "cycle_reserve_seconds", 30)
+    monkeypatch.setattr(worker, "CYCLE_DEADLINE", [worker.time.monotonic() + 30.5])
+    metrics = {"classified": 0, "opportunities": 0, "below_minimum": 0}
+    errors = []
+    await asyncio.wait_for(worker._process_queue(metrics, errors), timeout=3)
+    assert finished == [("retry", "prazo_do_ciclo")] and not errors and metrics["ai_budget_exhausted"]

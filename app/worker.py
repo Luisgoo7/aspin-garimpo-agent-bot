@@ -267,7 +267,8 @@ async def _collect_datajud(metrics: dict, errors: list[str]):
 
 async def _process_queue(metrics: dict, errors: list[str]):
     classifier = LLMClassifier()
-    deadline = time.monotonic() + settings.ai_time_budget_seconds
+    # Nunca passa do prazo do ciclo: reserva tempo para gravar e entregar no Telegram.
+    deadline = min(time.monotonic() + settings.ai_time_budget_seconds, CYCLE_DEADLINE[0] - settings.cycle_reserve_seconds)
     ai_calls = 0
     claims = 0
     while ai_calls < settings.max_classify_per_cycle and claims < settings.max_claims_per_cycle:
@@ -305,7 +306,14 @@ async def _process_queue(metrics: dict, errors: list[str]):
             if simulated("ia"):
                 result = {"error": True, "reason": "falha simulada da IA"}
             else:
-                result = await classifier.classify(focus_excerpt(text, settings.ai_max_chars))
+                remaining = deadline - time.monotonic()
+                try:
+                    result = await asyncio.wait_for(classifier.classify(focus_excerpt(text, settings.ai_max_chars)), timeout=max(1.0, remaining))
+                except (TimeoutError, asyncio.TimeoutError):
+                    # Prazo do ciclo: o documento volta para a fila sem contar como falha da IA.
+                    storage.finish_document(doc, "retry", error="prazo_do_ciclo")
+                    metrics["ai_budget_exhausted"] = True
+                    break
             ai_calls += 1
             metrics["classified"] += 1
             if result.get("error"):
@@ -468,7 +476,11 @@ async def _send_pending_alerts(metrics: dict, errors: list[str], opportunities: 
             break
 
 
+CYCLE_DEADLINE = [float("inf")]
+
+
 async def run_cycle(lookback_minutes: int | None = None) -> dict:
+    CYCLE_DEADLINE[0] = time.monotonic() + settings.cycle_timeout_seconds
     require_configuration()
     if simulated("db"):
         raise storage.DatabaseUnavailable("Banco: causa=falha_simulada | como corrigir: remova SIMULATE_FAILURE")

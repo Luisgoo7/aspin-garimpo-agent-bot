@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     djen_request_delay: float = Field(default=0.5, ge=0)
     djen_timeout_seconds: float = Field(default=30, ge=1, le=120)
     max_processing_attempts: int = Field(default=5, ge=1, le=20)
+    cycle_reserve_seconds: int = Field(default=240, ge=30, le=1800)
     ai_time_budget_seconds: int = Field(default=600, ge=30, le=7200)
     cycle_timeout_seconds: int = Field(default=1500, ge=60, le=7200)
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
