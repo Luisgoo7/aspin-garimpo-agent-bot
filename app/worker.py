@@ -919,6 +919,7 @@ def main():
             return buttons_exit_code(result)
         if args.send_preview:
             require_configuration()
+            storage.ensure_schema()
             return asyncio.run(send_preview())
         if args.check_db:
             if not settings.database_url.strip():

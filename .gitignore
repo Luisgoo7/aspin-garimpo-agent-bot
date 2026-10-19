@@ -4,5 +4,5 @@ __pycache__/
 .pytest_cache/
 
 # Arquivos locais da planilha (contêm o token)
-PLANILHA_*.gs
-PLANILHA_TOKEN.txt
+/PLANILHA_COLAR_NO_APPS_SCRIPT.gs
+/PLANILHA_TOKEN.txt
