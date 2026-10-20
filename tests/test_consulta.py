@@ -112,8 +112,9 @@ async def test_processo_command_replies_in_channel(monkeypatch, chat):
         {"texto": "Expeça-se ofício requisitório de R$ 423.517,23"}], "requisicao_em": None}))
     monkeypatch.setattr(storage, "process_insight", lambda d: {"opportunity": None, "documents": 2})
     assert await worker.handle_command(post(f"/processo {CNJ}"), set()) is True
-    assert chat[0]["chat_id"] == "-100123" and chat[0]["reply_to"] == 99
-    assert "Cumprimento de Sentença" in chat[0]["text"] and "R$ 423.517,23" in chat[0]["text"]
+    assert "Consultando" in chat[0]["text"]  # aviso imediato
+    assert chat[1]["chat_id"] == "-100123" and chat[1]["reply_to"] == 99
+    assert "Cumprimento de Sentença" in chat[1]["text"] and "R$ 423.517,23" in chat[1]["text"]
 
 
 @pytest.mark.asyncio
@@ -125,18 +126,29 @@ async def test_invalid_number_and_help(chat):
 
 
 @pytest.mark.asyncio
-async def test_other_chats_are_ignored_and_private_needs_approver(chat):
-    assert await worker.handle_command(post(f"/processo {CNJ}", chat_id="-999"), set()) is False
+async def test_outside_channel_only_channel_members_can_query(monkeypatch, chat):
+    monkeypatch.setattr(worker, "is_channel_member", AsyncMock(return_value=False))
     await worker.handle_command(post(f"/processo {CNJ}", chat_id="55", chat_type="private"), set())
-    assert "apenas no canal" in chat[0]["text"]
+    assert "restrita" in chat[0]["text"]
+    monkeypatch.setattr(worker, "is_channel_member", AsyncMock(return_value=True))
+    await worker.handle_command(post("/ajuda", chat_id="-777", chat_type="supergroup"), set())
+    assert "/processo" in chat[1]["text"] and chat[1]["chat_id"] == "-777"
     assert await worker.handle_command(post("bom dia"), set()) is False
+
+
+@pytest.mark.asyncio
+async def test_approvers_list_overrides_membership(monkeypatch, chat):
+    member = AsyncMock(return_value=True)
+    monkeypatch.setattr(worker, "is_channel_member", member)
+    await worker.handle_command(post("/ajuda", chat_id="55", chat_type="private", user_id=7), {"8"})
+    assert "restrita" in chat[0]["text"] and not member.await_count
 
 
 @pytest.mark.asyncio
 async def test_datajud_overload_message_is_not_not_found(monkeypatch, chat):
     monkeypatch.setattr(consulta, "datajud_lookup", AsyncMock(side_effect=consulta.ConsultaIndisponivel("parcial")))
     await worker.handle_command(post(f"/processo {CNJ}"), set())
-    assert "sobrecarregada" in chat[0]["text"] and "não significa" in chat[0]["text"]
+    assert "sobrecarregada" in chat[1]["text"] and "não significa" in chat[1]["text"]
 
 
 @pytest.mark.asyncio
@@ -147,7 +159,7 @@ async def test_rate_limit(monkeypatch, chat):
     monkeypatch.setattr(storage, "process_insight", lambda d: {"opportunity": None, "documents": 0})
     for _ in range(3):
         await worker.handle_command(post(f"/processo {CNJ}"), set())
-    assert "Muitas consultas" in chat[2]["text"]
+    assert "Muitas consultas" in chat[-1]["text"]
 
 
 @pytest.mark.asyncio

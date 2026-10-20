@@ -18,7 +18,8 @@ import html as _html
 
 from . import consulta, sheets
 from .telegram_bot import (APPROVE, DISCARD, TelegramError, answer_callback, decided_keyboard,
-                           decision_keyboard, get_updates, send_alert, send_message, set_buttons)
+                           decision_keyboard, get_updates, is_channel_member, send_alert, send_message,
+                           set_buttons)
 from .source_retry import recover_queries
 from . import storage
 
@@ -306,13 +307,16 @@ async def handle_command(post: dict, approvers: set[str]) -> bool:
     chat = post.get("chat") or {}
     chat_id = str(chat.get("id", ""))
     user_id = str((post.get("from") or {}).get("id", ""))
-    if chat.get("type") == "private":
-        if not approvers or user_id not in approvers:
-            await send_message("Este bot responde a consultas apenas no canal da ASPIN.", chat_id=chat_id)
-            return True
-    elif chat_id != str(settings.telegram_chat_id):
-        return False  # outro grupo/canal: ignora
     reply_to = post.get("message_id")
+    log.info("Comando recebido (%s, tipo=%s)", match.group(1), chat.get("type"))
+    # No próprio canal vale sempre; em privado ou grupo, só para quem é membro do canal
+    # (ou está em TELEGRAM_APPROVERS).
+    if chat_id != str(settings.telegram_chat_id):
+        allowed = user_id in approvers if approvers else await is_channel_member(user_id)
+        if not allowed:
+            await send_message("Consulta restrita à equipe da ASPIN (membros do canal de oportunidades).",
+                               chat_id=chat_id, reply_to=reply_to)
+            return True
     command, arg = match.group(1).casefold(), match.group(2)
     if command in ("ajuda", "start") or not consulta.only_digits(arg):
         await send_message(consulta.HELP_TEXT, html=True, chat_id=chat_id, reply_to=reply_to)
@@ -330,6 +334,9 @@ async def handle_command(post: dict, approvers: set[str]) -> bool:
     if not consulta.alias_from_cnj(digits):
         await send_message("Esse tribunal não tem índice público no DataJud (ex.: STF).", chat_id=chat_id, reply_to=reply_to)
         return True
+    # Aviso imediato: a API do CNJ costuma levar de 10 s a 1 min.
+    await send_message(f"🔎 Consultando {consulta.format_cnj(digits)} no CNJ… pode levar até 1 minuto.",
+                       chat_id=chat_id, reply_to=reply_to)
     try:
         process = await consulta.datajud_lookup(digits)
     except (consulta.ConsultaIndisponivel, DataJudError):

@@ -102,3 +102,12 @@ async def set_buttons(chat_id, message_id, reply_markup: dict) -> None:
     except TelegramError as exc:
         if "not modified" not in str(exc):
             raise
+
+
+async def is_channel_member(user_id) -> bool:
+    """Se o usuário é membro/admin do canal da ASPIN (o bot precisa ser admin do canal)."""
+    try:
+        member = await _call("getChatMember", {"chat_id": settings.telegram_chat_id, "user_id": int(user_id)})
+    except (TelegramError, TypeError, ValueError):
+        return False
+    return isinstance(member, dict) and member.get("status") in ("creator", "administrator", "member", "restricted")
