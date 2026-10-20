@@ -67,14 +67,14 @@ def etapas():
     steps = [
         ("1  Coleta", "A cada hora, lê o <b>DJEN</b> (Diário de Justiça Eletrônico Nacional, do CNJ) buscando termos como "
                       "“ofício requisitório”, “expedição de precatório” e “requisição de pagamento”. Também consulta o "
-                      "<b>DataJud</b> (base oficial do CNJ) pelo movimento “Expedição de precatório/RPV” no TJSP, TRF1 a TRF6, TJRJ e TJMG."),
+                      "<b>DataJud</b> (base oficial do CNJ) pelo movimento “Expedição de precatório/RPV” em <b>todos os 27 Tribunais de Justiça e nos 6 TRFs</b>."),
         ("2  Triagem", "Um filtro automático descarta o que não traz valor escrito ou fica abaixo de "
                        "<b>R$ 100 mil</b>. Só o que sobra segue para a leitura."),
         ("3  Leitura", "Uma inteligência artificial lê o texto e extrai: tipo de requisição, valor, credor, ente devedor, "
                        "natureza, preferência, honorários destacados, trânsito em julgado e terceiros interessados. "
                        "<b>Trava de segurança:</b> o valor e o trecho precisam estar literalmente na publicação; a IA não pode inventar dados."),
         ("4  Entrega", "Às <b>08h, 12h e 18h</b> chegam as 3 melhores no Telegram, com a Nota ASPIN e o link da publicação. "
-                       "<b>Aprovar</b> grava tudo na planilha; <b>Descartar</b> registra a decisão. Vale o primeiro clique."),
+                       "<b>Aprovar</b> grava tudo na planilha em segundos; <b>Descartar</b> registra a decisão. Consulta rápida: <b>/processo</b> + número traz o resumo de qualquer processo."),
     ]
     row_t = [P(f'<font name="Bold" color="white">{t}</font>', base) for t, _ in steps]
     row_b = [P(b, cell) for _, b in steps]
