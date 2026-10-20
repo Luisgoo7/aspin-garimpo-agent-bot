@@ -16,7 +16,7 @@ from .opportunity import KEYWORDS, focus_excerpt, max_amount_in_text, canonical_
 from .sources import search_djen, probe_tjsp_pages
 import html as _html
 
-from . import sheets
+from . import consulta, sheets
 from .telegram_bot import (APPROVE, DISCARD, TelegramError, answer_callback, decided_keyboard,
                            decision_keyboard, get_updates, send_alert, send_message, set_buttons)
 from .source_retry import recover_queries
@@ -294,6 +294,73 @@ def _person(user: dict) -> str:
     return name + (f" (@{user['username']})" if user.get("username") else "")
 
 
+COMMAND_TIMES: list[float] = []
+
+
+async def handle_command(post: dict, approvers: set[str]) -> bool:
+    """Responde /processo e /ajuda no canal da ASPIN ou no privado de quem pode aprovar."""
+    text = str(post.get("text") or "").strip()
+    match = consulta.COMMAND_RE.match(text)
+    if not match:
+        return False
+    chat = post.get("chat") or {}
+    chat_id = str(chat.get("id", ""))
+    user_id = str((post.get("from") or {}).get("id", ""))
+    if chat.get("type") == "private":
+        if not approvers or user_id not in approvers:
+            await send_message("Este bot responde a consultas apenas no canal da ASPIN.", chat_id=chat_id)
+            return True
+    elif chat_id != str(settings.telegram_chat_id):
+        return False  # outro grupo/canal: ignora
+    reply_to = post.get("message_id")
+    command, arg = match.group(1).casefold(), match.group(2)
+    if command in ("ajuda", "start") or not consulta.only_digits(arg):
+        await send_message(consulta.HELP_TEXT, html=True, chat_id=chat_id, reply_to=reply_to)
+        return True
+    now = time.monotonic()
+    COMMAND_TIMES[:] = [t for t in COMMAND_TIMES if now - t < 60]
+    if len(COMMAND_TIMES) >= settings.consulta_max_per_minute:
+        await send_message("Muitas consultas no último minuto; tente de novo em instantes.", chat_id=chat_id, reply_to=reply_to)
+        return True
+    COMMAND_TIMES.append(now)
+    digits = consulta.only_digits(arg)
+    if len(digits) != 20 or not consulta.cnj_check_digits_ok(digits):
+        await send_message("Número CNJ inválido. Use o formato 0000000-00.0000.0.00.0000.", chat_id=chat_id, reply_to=reply_to)
+        return True
+    if not consulta.alias_from_cnj(digits):
+        await send_message("Esse tribunal não tem índice público no DataJud (ex.: STF).", chat_id=chat_id, reply_to=reply_to)
+        return True
+    try:
+        process = await consulta.datajud_lookup(digits)
+    except (consulta.ConsultaIndisponivel, DataJudError):
+        await send_message("A API do CNJ (DataJud) está sobrecarregada agora; tente novamente em alguns minutos. "
+                           "Isso não significa que o processo não existe.", chat_id=chat_id, reply_to=reply_to)
+        return True
+    djen = None
+    max_amount = None
+    try:
+        djen = await consulta.djen_lookup(digits)
+        amounts = [max_amount_in_text(clean_text(i.get("texto") or "")) for i in djen.get("items", [])]
+        amounts = [a for a in amounts if a]
+        max_amount = max(amounts) if amounts else None
+    except Exception:
+        djen = {"error": "DJEN indisponível no momento"}
+    internal = None
+    try:
+        insight = storage.process_insight(digits)
+        opp = insight.get("opportunity")
+        internal = {"documents": insight.get("documents", 0)}
+        if opp:
+            opp = dict(opp)
+            opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+            internal.update(nota=nota_aspin(opp)[0], decision=opp.get("decision"))
+    except Exception:
+        internal = None
+    await send_message(consulta.summarize(digits, process, djen, internal, max_amount), html=True,
+                       chat_id=chat_id, reply_to=reply_to)
+    return True
+
+
 async def process_buttons(poll_seconds: int = 0) -> dict:
     """Lê os cliques em Aprovar/Descartar, grava a decisão e envia as aprovadas à planilha."""
     metrics = {"clicks": 0, "approved": 0, "discarded": 0, "ignored": 0, "sheet_ok": 0, "sheet_failed": 0}
@@ -303,6 +370,14 @@ async def process_buttons(poll_seconds: int = 0) -> dict:
     updates = await get_updates(offset, poll_seconds) if poll_seconds else await get_updates(offset)
     for update in updates:
         offset = int(update["update_id"]) + 1
+        post = update.get("message") or update.get("channel_post")
+        if post:
+            try:
+                if await handle_command(post, approvers):
+                    metrics["commands"] = metrics.get("commands", 0) + 1
+            except Exception as exc:
+                log.warning("Comando não respondido: %s", storage.safe_error(exc))
+            continue
         query = update.get("callback_query") or {}
         if not query:
             continue

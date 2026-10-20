@@ -79,7 +79,7 @@ jobs:
       SHEETS_WEBHOOK_URL: ${{ secrets.SHEETS_WEBHOOK_URL }}
       SHEETS_TOKEN: ${{ secrets.SHEETS_TOKEN }}
       TELEGRAM_APPROVERS: ${{ vars.TELEGRAM_APPROVERS || '' }}
-      DATAJUD_TRIBUNALS: ${{ vars.DATAJUD_TRIBUNALS || 'api_publica_tjsp,api_publica_trf3,api_publica_trf1,api_publica_trf2,api_publica_trf4,api_publica_trf5,api_publica_trf6,api_publica_tjrj,api_publica_tjmg' }}
+      DATAJUD_TRIBUNALS: ${{ vars.DATAJUD_TRIBUNALS || 'todos' }}   # todos os 27 TJs + 6 TRFs
       DJEN_TRIBUNALS: ${{ vars.DJEN_TRIBUNALS || '' }}
       ENABLE_DJEN: ${{ vars.ENABLE_DJEN || 'false' }}
       SIMULATE_FAILURE: ${{ inputs.simulate_failure || '' }}
@@ -101,7 +101,7 @@ jobs:
       DATAJUD_PAGE_SIZE: '100'
       DATAJUD_MAX_PAGES: '2'
       AI_TIME_BUDGET_SECONDS: '900'
-      DATAJUD_TIME_BUDGET_SECONDS: '300'
+      DATAJUD_TIME_BUDGET_SECONDS: '420'
     steps:
       - name: Baixar código
         uses: actions/checkout@v4

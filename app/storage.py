@@ -368,6 +368,16 @@ OPPORTUNITY_FULL_SQL = """select o.*,p.cnj_number,p.source_url,t.alias,e.text_ex
     join public.tribunals t on t.id=p.tribunal_id left join public.evidence e on e.id=o.evidence_id"""
 
 
+def process_insight(cnj_digits: str) -> dict:
+    """Oportunidade mais recente e publicações já coletadas para o processo."""
+    with connect() as conn:
+        opp = conn.execute(OPPORTUNITY_FULL_SQL + """ where regexp_replace(p.cnj_number,'[^0-9]','','g')=%s
+            order by o.created_at desc limit 1""", (cnj_digits,)).fetchone()
+        docs = conn.execute("""select count(*) as n from public.source_documents
+            where regexp_replace(coalesce(process_number,''),'[^0-9]','','g')=%s""", (cnj_digits,)).fetchone()["n"]
+    return {"opportunity": opp, "documents": docs}
+
+
 def set_telegram_message(opp_id, chat_id, message_id) -> None:
     with connect() as conn:
         conn.execute("update public.opportunities set telegram_chat_id=%s,telegram_message_id=%s where id=%s",
