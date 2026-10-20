@@ -11,7 +11,9 @@ BASE_URL = "https://api-publica.datajud.cnj.jus.br"
 MOVEMENT_EXPEDICAO_PRECATORIO_RPV = 12457
 SOURCE_FIELDS = ["numeroProcesso", "classe", "orgaoJulgador", "grau", "tribunal",
                  "dataHoraUltimaAtualizacao", "movimentos.codigo", "movimentos.nome", "movimentos.dataHora"]
-RETRY_STATUSES = {429, 500, 502, 503, 504}
+# 429 é rejeição rápida da fila (retentar é barato). 504 custa ~60 s e indica saturação do
+# gateway do CNJ: não retentar (ref.: rvsanches/skills-datajud-djen, operação em produção).
+RETRY_STATUSES = {429, 500, 502, 503}
 
 
 class DataJudError(RuntimeError):
@@ -45,6 +47,8 @@ class DataJudClient:
                         await asyncio.sleep(_retry_delay(response, attempt))
                         continue
                     raise DataJudError(f"HTTP {status} após {self.max_retries} tentativas")
+                if status == 504:
+                    raise DataJudError("HTTP 504: DataJud sobrecarregado (sem nova tentativa)")
                 if status in (401, 403):
                     raise DataJudError(f"HTTP {status}: chave pública DataJud recusada (verifique se o CNJ trocou a chave)")
                 if status == 404:

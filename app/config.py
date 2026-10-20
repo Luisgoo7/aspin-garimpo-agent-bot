@@ -5,11 +5,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 # Endpoints oficiais api_publica_* do DataJud (CNJ). Foco: SP + Justiça Federal + RJ.
-DEFAULT_DATAJUD_TRIBUNALS = ",".join((
-    "api_publica_tjsp", "api_publica_trf3", "api_publica_trf1", "api_publica_trf2",
-    "api_publica_trf4", "api_publica_trf5", "api_publica_trf6", "api_publica_tjrj",
-    "api_publica_tjmg",
-))
+_UFS = ("ac", "al", "ap", "am", "ba", "ce", "dft", "es", "go", "ma", "mt", "ms", "mg", "pa", "pb", "pr",
+        "pe", "pi", "rj", "rn", "rs", "ro", "rr", "sc", "se", "sp", "to")
+# Todos os 27 Tribunais de Justiça + 6 TRFs (endpoints oficiais api_publica_* do DataJud).
+# SP e Justiça Federal primeiro; o rodízio por ciclo garante que todos sejam visitados.
+DEFAULT_DATAJUD_TRIBUNALS = ",".join(
+    ["api_publica_tjsp", "api_publica_trf3", "api_publica_trf1", "api_publica_trf2", "api_publica_trf4",
+     "api_publica_trf5", "api_publica_trf6"]
+    + [f"api_publica_tj{uf}" for uf in _UFS if uf != "sp"]
+)
 
 
 DATABASE_URL_NORMALIZED = [False]
@@ -59,6 +63,7 @@ class Settings(BaseSettings):
     sheets_token: str = ""
     # IDs numéricos do Telegram autorizados a aprovar/descartar (vazio = qualquer membro do canal).
     telegram_approvers: str = ""
+    consulta_max_per_minute: int = Field(default=10, ge=1, le=120)
     sheet_failure_streak_to_alert: int = Field(default=3, ge=1, le=100)
     collector_max_gap_minutes: int = Field(default=65, ge=10, le=1440)
     daemon_poll_seconds: int = Field(default=25, ge=1, le=50)
@@ -84,6 +89,12 @@ class Settings(BaseSettings):
     ai_time_budget_seconds: int = Field(default=600, ge=30, le=7200)
     cycle_timeout_seconds: int = Field(default=1500, ge=60, le=7200)
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("datajud_tribunals", mode="before")
+    @classmethod
+    def _all_tribunals_alias(cls, value):
+        text = str(value or "").strip()
+        return DEFAULT_DATAJUD_TRIBUNALS if text.casefold() in ("", "todos", "all") else text
 
     @field_validator("database_url", mode="before")
     @classmethod

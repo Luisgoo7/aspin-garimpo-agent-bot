@@ -60,8 +60,11 @@ def decided_keyboard(label: str) -> dict:
     return {"inline_keyboard": [[{"text": label[:60], "callback_data": "noop"}]]}
 
 
-async def send_message(text: str, reply_markup: dict | None = None, html: bool = False) -> dict:
-    payload = {"chat_id": settings.telegram_chat_id, "text": text[:4096], "disable_web_page_preview": True}
+async def send_message(text: str, reply_markup: dict | None = None, html: bool = False,
+                       chat_id: str | None = None, reply_to: int | None = None) -> dict:
+    payload = {"chat_id": chat_id or settings.telegram_chat_id, "text": text[:4096], "disable_web_page_preview": True}
+    if reply_to:
+        payload["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
     if html:
         payload["parse_mode"] = "HTML"
     if reply_markup:
@@ -79,7 +82,7 @@ async def send_alert(text: str) -> None:
 
 async def get_updates(offset: int | None, poll_seconds: int = 0) -> list[dict]:
     """poll_seconds > 0 = long polling: a chamada fica aberta e volta assim que houver clique."""
-    payload = {"timeout": poll_seconds, "allowed_updates": ["callback_query"], "limit": 100}
+    payload = {"timeout": poll_seconds, "allowed_updates": ["callback_query", "message", "channel_post"], "limit": 100}
     if offset is not None:
         payload["offset"] = offset
     result = await _call("getUpdates", payload, timeout=poll_seconds + 20, require_result=False)
