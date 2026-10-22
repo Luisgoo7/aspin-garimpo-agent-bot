@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     initial_lookback_days: int = Field(default=7, ge=1, le=30)
     incremental_lookback_minutes: int = Field(default=120, ge=1)
     min_confidence: float = Field(default=0.78, ge=0, le=1)
-    min_opportunity_amount: float = Field(default=100000, ge=0)
+    min_opportunity_amount: float = Field(default=150000, ge=0)  # ticket mínimo da ASPIN
     aspin_commission_rate: float = Field(default=0.05, ge=0, le=1)
     datajud_page_size: int = Field(default=100, ge=1, le=1000)
     max_classify_per_cycle: int = Field(default=25, ge=1, le=1000)

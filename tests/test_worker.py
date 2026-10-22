@@ -101,6 +101,7 @@ def test_db(monkeypatch):
     if "aspin_test" not in url:
         pytest.fail("Somente banco aspin_test pode ser usado pelos testes destrutivos")
     monkeypatch.setattr(settings, "database_url", url)
+    monkeypatch.setattr(settings, "min_opportunity_amount", 100000)  # dados de exemplo (R$ 135 mil)
     storage.ensure_schema()
     with storage.connect() as conn:
         conn.execute("truncate public.opportunities,public.evidence,public.processes,public.source_documents,public.collection_runs,public.audit_log,public.bot_state,public.collector_lease cascade")
