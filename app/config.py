@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     consulta_max_per_minute: int = Field(default=10, ge=1, le=120)
     sheet_failure_streak_to_alert: int = Field(default=3, ge=1, le=100)
     collector_max_gap_minutes: int = Field(default=65, ge=10, le=1440)
+    retention_hours: int = Field(default=48, ge=12, le=24 * 60)
+    retention_interval_minutes: int = Field(default=60, ge=10, le=24 * 60)
     daemon_poll_seconds: int = Field(default=25, ge=1, le=50)
     daemon_queue_check_seconds: int = Field(default=120, ge=10, le=3600)
     ai_max_chars: int = Field(default=6000, ge=1000, le=30000)

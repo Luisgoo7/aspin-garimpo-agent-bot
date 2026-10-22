@@ -34,6 +34,7 @@ def daemon_env(monkeypatch):
     monkeypatch.setattr(worker, "redispatch_daemon", AsyncMock(return_value=True))
     monkeypatch.setattr(worker, "queued_runs", AsyncMock(return_value=[]))
     monkeypatch.setattr(worker, "_deliver_digest_now", AsyncMock())
+    monkeypatch.setattr(worker, "retention_job", AsyncMock(return_value={}))
     return clock, polls
 
 
@@ -139,3 +140,30 @@ async def test_deliver_now_only_when_slot_is_due_and_pending(monkeypatch):
     state["last_digest"] = {"slot": slot.isoformat()}
     await worker._deliver_digest_now(totals)
     assert deliver.await_count == 1
+
+
+
+@pytest.mark.asyncio
+async def test_daemon_runs_retention_periodically(monkeypatch, daemon_env):
+    clock, polls = daemon_env
+    monkeypatch.setattr(worker, "collector_dispatch_reason", lambda: None)
+    monkeypatch.setattr(settings, "retention_interval_minutes", 10)
+    job = AsyncMock(return_value={"oportunidades_removidas": 2})
+    monkeypatch.setattr(worker, "retention_job", job)
+    totals = await worker.run_daemon(max_minutes=25)
+    assert job.await_count in (2, 3) and totals["retencao"] == {"oportunidades_removidas": 2}
+
+
+@pytest.mark.asyncio
+async def test_retention_job_marks_unanswered_messages_as_expired(monkeypatch):
+    from app import storage
+    monkeypatch.setattr(storage, "expiring_messages", lambda hours: [
+        {"id": "a", "telegram_chat_id": "-1", "telegram_message_id": 10}])
+    monkeypatch.setattr(storage, "retention_cleanup", lambda hours: {"oportunidades_removidas": 1})
+    vac = []
+    monkeypatch.setattr(storage, "vacuum", lambda full=False: vac.append(full))
+    buttons = AsyncMock()
+    monkeypatch.setattr(worker, "set_buttons", buttons)
+    report = await worker.retention_job(vacuum_full=True)
+    assert report == {"mensagens_expiradas": 1, "oportunidades_removidas": 1} and vac == [True]
+    assert buttons.await_args.args[2]["inline_keyboard"][0][0]["text"] == "⌛ Expirou (48h)"

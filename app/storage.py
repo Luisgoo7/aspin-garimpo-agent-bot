@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import uuid
 import json
 import time
@@ -26,7 +27,7 @@ def Jsonb(value):
     """JSONB tolerante a datetime/Decimal: métrica com tipo inesperado não derruba o ciclo."""
     return _Jsonb(value, dumps=_dumps)
 APP_NAME = "aspin-garimpo-" + ("actions" if os.environ.get("GITHUB_ACTIONS") else "worker")
-MIGRATIONS = ("001_initial_schema.sql", "002_sources_and_runs.sql", "003_reliable_processing.sql", "004_prefilter_and_signals.sql", "005_decisions.sql")
+MIGRATIONS = ("001_initial_schema.sql", "002_sources_and_runs.sql", "003_reliable_processing.sql", "004_prefilter_and_signals.sql", "005_decisions.sql", "006_retention.sql")
 
 
 class DatabaseUnavailable(RuntimeError):
@@ -307,12 +308,25 @@ def queue_counts() -> dict:
         return {r["processing_status"]: r["n"] for r in rows}
 
 
+def tombstone_key(alias: str, cnj: str, rtype: str | None) -> str:
+    """Rastro mínimo de uma oportunidade (tribunal|processo|tipo), sem dados pessoais."""
+    return f"{canonical_alias(alias)}|{re.sub(r'[^0-9]', '', str(cnj or ''))}|{rtype or 'outro'}"
+
+
+TOMBSTONE_SQL = ("t.alias || '|' || regexp_replace(p.cnj_number, '[^0-9]', '', 'g') || '|' || "
+                 "coalesce(o.requisition_type, 'outro')")
+
+
 def save_opportunity(doc: dict, result: dict) -> tuple[str, bool]:
     alias = canonical_alias(doc["tribunal_alias"])
     cnj = canonical_cnj(doc["process_number"] or "") or "documento-" + str(doc["id"])
     rtype = result.get("requisition_type") or "outro"
     quote = (result.get("evidence_quote") or clean_text(doc.get("text_excerpt") or "")[:500] or "(sem trecho)")
     with connect() as conn:
+        # Já notificada e apagada pela retenção de 48 h: não cria nem alerta de novo.
+        if conn.execute("select 1 from public.opportunity_tombstones where key=%s",
+                        (tombstone_key(alias, cnj, rtype),)).fetchone():
+            return None, False
         old = conn.execute("""select o.* from public.opportunities o join public.processes p on p.id=o.process_id
             join public.tribunals t on t.id=p.tribunal_id where t.alias=any(%s)
             and (p.cnj_number=any(%s) or regexp_replace(p.cnj_number,'[^0-9]','','g')=%s)
@@ -456,3 +470,106 @@ def finish_run(run_id, outcome: str, metrics: dict, errors: list[str]):
             (outcome, metrics.get("tribunals", 0), metrics.get("classified", 0), Jsonb(errors), Jsonb(metrics), run_id))
         conn.execute("insert into public.audit_log(action,metadata) values(%s,%s)",
             ("collection_completed", Jsonb({"outcome": outcome, **metrics, "errors": errors})))
+
+
+
+# ---------------------------------------------------------------------------
+# Retenção de 48 h (limite de disco do Supabase gratuito). Política aprovada pela ASPIN:
+# aprovadas ficam na planilha; descartadas e sem resposta são apagadas, guardando só o
+# rastro mínimo para não notificar de novo; publicações brutas (públicas) são apagadas.
+# ---------------------------------------------------------------------------
+RETENTION_TABLES = ("source_documents", "opportunities", "evidence", "processes", "audit_log", "collection_runs",
+                    "opportunity_tombstones")
+TERMINAL_DOC_STATUSES = ("ignored", "below_minimum", "needs_enrichment", "rejected", "expired", "failed", "cancelled")
+
+
+def _maintenance_connection():
+    """Autocommit + sai do modo 'somente leitura' que o Supabase aplica ao passar do limite de disco."""
+    conn = connect()
+    conn.autocommit = True
+    try:
+        conn.execute("set session characteristics as transaction read write")
+    except psycopg.Error:
+        pass
+    return conn
+
+
+def expiring_messages(hours: int) -> list[dict]:
+    """Mensagens do Telegram sem resposta cujas oportunidades vão expirar agora."""
+    with connect() as conn:
+        return conn.execute("""select id, telegram_chat_id, telegram_message_id from public.opportunities
+            where created_at < now() - make_interval(hours => %s) and decision is null
+            and telegram_message_id is not null""", (hours,)).fetchall()
+
+
+def retention_cleanup(hours: int) -> dict:
+    """Apaga o que passou de `hours` horas, preservando só o necessário.
+
+    - Oportunidades: apagadas (as aprovadas só depois de gravadas na planilha); fica apenas o
+      rastro tribunal|processo|tipo, para o bot não notificar de novo a mesma.
+    - Publicações coletadas: terminais são apagadas; pendentes antigas viram 'expired' e são apagadas;
+      classificadas e sinais do DataJud ficam só com a impressão digital (fonte, id, hash),
+      para não serem reprocessadas nem realertadas.
+    - Histórico técnico: auditoria > 7 dias e métricas de ciclos > 14 dias.
+    """
+    counts = {}
+    conn = _maintenance_connection()
+    try:
+        def run(key, sql, params=()):
+            counts[key] = conn.execute(sql, params).rowcount
+
+        expired = """from public.opportunities o join public.processes p on p.id = o.process_id
+            join public.tribunals t on t.id = p.tribunal_id
+            where o.created_at < now() - make_interval(hours => %s)
+            and not (o.decision = 'aprovada' and o.sheet_synced_at is null)"""
+        run("rastros_gravados", f"""insert into public.opportunity_tombstones(key)
+            select distinct {TOMBSTONE_SQL} {expired} on conflict (key) do nothing""", (hours,))
+        run("oportunidades_removidas", f"""delete from public.opportunities where id in (select o.id {expired})""", (hours,))
+        run("evidencias_removidas", """delete from public.evidence e where not exists
+            (select 1 from public.opportunities o where o.evidence_id = e.id)
+            and e.captured_at < now() - make_interval(hours => %s)""", (hours,))
+        run("processos_removidos", """delete from public.processes p where not exists
+            (select 1 from public.opportunities o where o.process_id = p.id)
+            and p.created_at < now() - make_interval(hours => %s)""", (hours,))
+        run("publicacoes_expiradas", """update public.source_documents set processing_status = 'expired'
+            where first_seen_at < now() - make_interval(hours => %s)
+            and processing_status in ('pending', 'retry', 'processing')""", (hours,))
+        run("publicacoes_removidas", """delete from public.source_documents
+            where first_seen_at < now() - make_interval(hours => %s)
+            and processing_status = any(%s)""", (hours, list(TERMINAL_DOC_STATUSES)))
+        run("publicacoes_compactadas", """update public.source_documents
+            set text_excerpt = null, raw_data = '{}'::jsonb, classification = null, title = null, last_error = null
+            where first_seen_at < now() - make_interval(hours => %s)
+            and (text_excerpt is not null or raw_data <> '{}'::jsonb)""", (hours,))
+        run("auditoria_removida", "delete from public.audit_log where created_at < now() - interval '7 days'")
+        run("rastros_antigos_removidos",
+            "delete from public.opportunity_tombstones where created_at < now() - interval '365 days'")
+        run("ciclos_compactados", """update public.collection_runs set metrics = '{}'::jsonb
+            where started_at < now() - interval '14 days' and metrics <> '{}'::jsonb""")
+    finally:
+        conn.close()
+    return counts
+
+
+def vacuum(full: bool = False) -> None:
+    """VACUUM libera espaço para reuso; FULL devolve o disco (bloqueia cada tabela por instantes)."""
+    conn = _maintenance_connection()
+    try:
+        for table in RETENTION_TABLES:
+            try:
+                conn.execute(f"vacuum {'full ' if full else ''}analyze public.{table}")
+            except psycopg.Error:
+                continue
+    finally:
+        conn.close()
+
+
+def database_size_report() -> dict:
+    with connect() as conn:
+        total = conn.execute("select pg_database_size(current_database()) as b").fetchone()["b"]
+        tables = conn.execute("""select relname as tabela, pg_total_relation_size(relid) as b
+            from pg_catalog.pg_statio_user_tables order by b desc limit 8""").fetchall()
+
+    def mb(b):
+        return round(b / 1024 / 1024, 1)
+    return {"total_mb": mb(total), "tabelas_mb": {t["tabela"]: mb(t["b"]) for t in tables}}

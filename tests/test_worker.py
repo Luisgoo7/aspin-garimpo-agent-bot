@@ -319,3 +319,41 @@ def test_bulk_upsert_matches_single_upsert_and_is_idempotent(test_db):
     counts = storage.queue_counts()
     assert counts["pending"] == 1200
     assert float(storage.claim_document()["prefilter_amount"]) == 1399000.0
+
+
+def test_retention_48h_keeps_only_what_is_needed(test_db):
+    def opportunity(source_id, cnj):
+        row = dict(source_row(), id=source_id, numero_processo=cnj)
+        storage.upsert_document(row)
+        doc = storage.claim_document()
+        opp_id, created = storage.save_opportunity(doc, positive())
+        storage.finish_document(doc, "classified", positive())
+        assert created
+        return opp_id
+    approved_synced = opportunity("r1", "0000001-23.2026.4.01.3400")
+    approved_pending = opportunity("r2", "0000002-23.2026.4.01.3400")
+    unanswered = opportunity("r3", "0000003-23.2026.4.01.3400")
+    fresh = opportunity("r4", "0000004-23.2026.4.01.3400")
+    storage.record_decision(approved_synced, "aprovada", "Ana")
+    storage.mark_sheet(approved_synced)
+    storage.record_decision(approved_pending, "aprovada", "Ana")
+    storage.upsert_document({"id": "lixo", "siglaTribunal": "TJSP", "texto": "Intime-se."})
+    with storage.connect() as conn:
+        conn.execute("update public.opportunities set created_at = now() - interval '3 days' where id = any(%s)",
+                     ([approved_synced, approved_pending, unanswered],))
+        conn.execute("update public.source_documents set first_seen_at = now() - interval '3 days' where external_id <> 'r4'")
+    report = storage.retention_cleanup(48)
+    with storage.connect() as conn:
+        left = {r["id"] for r in conn.execute("select id from public.opportunities").fetchall()}
+        docs = conn.execute("select external_id, text_excerpt, raw_data from public.source_documents order by external_id").fetchall()
+    assert left == {approved_pending, fresh}  # aprovada ainda fora da planilha fica; recente fica
+    assert report["oportunidades_removidas"] == 2 and report["rastros_gravados"] == 2
+    assert "lixo" not in {d["external_id"] for d in docs}  # publicação sem valor apagada
+    old = [d for d in docs if d["external_id"] in ("r1", "r2", "r3")]
+    assert old and all(d["text_excerpt"] is None and d["raw_data"] == {} for d in old)  # só a impressão digital
+    # A mesma oportunidade, vista de novo, não é recriada nem notificada.
+    storage.upsert_document(dict(source_row(), id="r3-novo", numero_processo="0000003-23.2026.4.01.3400"))
+    doc = storage.claim_document()
+    assert storage.save_opportunity(doc, positive()) == (None, False)
+    storage.vacuum(full=True)
+    assert storage.database_size_report()["total_mb"] > 0

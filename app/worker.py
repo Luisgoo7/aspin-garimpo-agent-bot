@@ -416,7 +416,11 @@ async def process_buttons(poll_seconds: int = 0) -> dict:
             break
         if current is None:
             metrics["ignored"] += 1
-            await answer_callback(query.get("id", ""), "Oportunidade não encontrada.")
+            await answer_callback(query.get("id", ""), "⌛ Expirou: sem resposta em 48 h, a oportunidade foi removida.")
+            try:
+                await set_buttons(chat_id, message.get("message_id"), decided_keyboard("⌛ Expirou (48h)"))
+            except TelegramError:
+                pass
             continue
         final = current.get("decision")
         by = current.get("decided_by") or who
@@ -1077,12 +1081,22 @@ async def run_daemon(max_minutes: float) -> dict:
     totals = {"clicks": 0, "approved": 0, "discarded": 0, "sheet_ok": 0, "cycles": 0, "errors": 0}
     cycle: asyncio.Task | None = None
     last_queue_check = started
+    last_retention = float("-inf")
     yielding = False
     while True:
         now = time.monotonic()
         if cycle is not None and cycle.done():
             totals["cycles"] += 1
             cycle = None
+        if cycle is None and now - last_retention >= settings.retention_interval_minutes * 60:
+            last_retention = now
+            try:
+                report = await retention_job()
+                totals["retencao"] = report
+                log.info("Robô: retenção 48 h: %s", json.dumps(report, ensure_ascii=False))
+            except Exception as exc:
+                totals["errors"] += 1
+                log.warning("Robô: retenção adiada: %s", storage.safe_error(exc))
         if cycle is None:
             # Entrega das 08/12/18h na hora exata, com o que já foi classificado; não espera
             # um ciclo de coleta terminar. (Com ciclo rodando, o próprio ciclo entrega ao final.)
@@ -1121,6 +1135,23 @@ async def run_daemon(max_minutes: float) -> dict:
     totals["redispatched"] = await redispatch_daemon()
     totals["minutes"] = round((time.monotonic() - started) / 60, 1)
     return totals
+
+
+async def retention_job(vacuum_full: bool = False) -> dict:
+    """Retenção de 48 h: marca no Telegram as mensagens que ficaram sem resposta e apaga do
+    banco o que passou do prazo (aprovadas só depois de gravadas na planilha)."""
+    hours = settings.retention_hours
+    report: dict = {"mensagens_expiradas": 0}
+    for opp in storage.expiring_messages(hours):
+        try:
+            await set_buttons(opp.get("telegram_chat_id"), opp.get("telegram_message_id"),
+                              decided_keyboard("⌛ Expirou (48h)"))
+            report["mensagens_expiradas"] += 1
+        except TelegramError:
+            pass
+    report.update(storage.retention_cleanup(hours))
+    storage.vacuum(full=vacuum_full)
+    return report
 
 
 def buttons_exit_code(result: dict) -> int:
@@ -1194,12 +1225,23 @@ def main():
     parser.add_argument("--send-preview", action="store_true", help="envia ao canal uma prévia da entrega das 12h")
     parser.add_argument("--process-buttons", action="store_true", help="processa cliques Aprovar/Descartar e grava na planilha")
     parser.add_argument("--daemon", action="store_true", help="robô sempre ligado: cliques em tempo real + coleta/entregas")
+    parser.add_argument("--maintenance", action="store_true", help="retenção de 48 h + compactação completa do banco")
     parser.add_argument("--max-minutes", type=float, default=340, help="duração máxima do robô antes de se reiniciar")
     args = parser.parse_args()
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     if args.simulate_failure:
         settings.simulate_failure = args.simulate_failure
     try:
+        if args.maintenance:
+            require_configuration()
+            storage.ensure_schema()
+            before = storage.database_size_report()
+            report = asyncio.run(retention_job(vacuum_full=True))
+            after = storage.database_size_report()
+            result = {"antes": before, "retencao": report, "depois": after}
+            print(json.dumps(result, ensure_ascii=False, default=str))
+            write_buttons_summary({"banco_antes_mb": before["total_mb"], "banco_depois_mb": after["total_mb"], **report})
+            return EXIT_OK
         if args.daemon:
             require_configuration()
             storage.ensure_schema()
