@@ -342,6 +342,19 @@ def test_database_url_whitespace_is_removed():
     assert config.database_url == "postgresql://u:p@aws-0-sa-east-1.pooler.supabase.com:5432/postgres"
 
 
+def test_database_url_raw_password_symbols_are_encoded():
+    from urllib.parse import unquote, urlsplit
+    from app.config import Settings
+    host = "aws-1-sa-east-1.pooler.supabase.com:5432/postgres"
+    config = Settings(_env_file=None, database_url=f"postgresql://postgres.abc:Pa@ss/w#rd?%z@{host}")
+    parts = urlsplit(config.database_url)
+    assert parts.hostname == "aws-1-sa-east-1.pooler.supabase.com" and parts.port == 5432
+    assert unquote(parts.password) == "Pa@ss/w#rd?%z" and parts.username == "postgres.abc"
+    # Senha já codificada ou sem símbolos fica intacta.
+    for dsn in (f"postgresql://u:Pa%40ss@{host}", f"postgresql://u:Simples123@{host}"):
+        assert Settings(_env_file=None, database_url=dsn).database_url == dsn
+
+
 def test_pooler_region_missing_hyphen_is_repaired(monkeypatch):
     ok = {"aws-1-ca-central-1.pooler.supabase.com"}
     monkeypatch.setattr(dbcheck, "resolve", lambda host, port: {"dns": "ok" if host in ok else "nao_resolve", "ipv4": 1, "ipv6": 0})
