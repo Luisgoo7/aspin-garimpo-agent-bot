@@ -12,7 +12,7 @@ def configured() -> bool:
     return bool(settings.sheets_webhook_url.strip() and settings.sheets_token.strip())
 
 
-LAYOUT_VERSION = 2  # sobe quando o script da planilha muda o layout/formatação
+LAYOUT_VERSION = 3  # v3: colunas Data de expedição (ofício) e Data base
 
 
 async def script_version() -> int:

@@ -99,8 +99,22 @@ NOTA_CRITERIA = (
     ("datajud", "Expedição confirmada no DataJud", 2),
     ("sem_cessao", "Sem FIDC/banco/cessionário citado", 2),
     ("alimentar", "Natureza alimentar", 1),
-    ("preferencia", "Preferência legal (idoso, doença grave)", 1),
+    ("recente", "Publicação recente (até 7 dias)", 1),
 )
+
+
+def _published_recently(result: dict, opp: dict, days: int) -> bool:
+    """Publicação há até `days` dias (a cliente: quanto mais recente, menos concorrência)."""
+    raw = result.get("published_at") or opp.get("created_at")
+    if not raw:
+        return False
+    try:
+        when = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw)[:19])
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - when <= timedelta(days=days)
 
 
 def nota_aspin(opp: dict) -> tuple[int, list[tuple[str, str, bool, int]]]:
@@ -116,7 +130,7 @@ def nota_aspin(opp: dict) -> tuple[int, list[tuple[str, str, bool, int]]]:
         "datajud": bool(opp.get("datajud_signal")),
         "sem_cessao": not result.get("third_party_interest"),
         "alimentar": result.get("credit_nature") == "alimentar",
-        "preferencia": bool(result.get("legal_preference")),
+        "recente": _published_recently(result, opp, days=7),
     }
     items = [(key, label, checks[key], weight) for key, label, weight in NOTA_CRITERIA]
     return sum(weight for _, _, ok, weight in items if ok), items
@@ -133,8 +147,6 @@ def rank_score(opp: dict) -> float:
     score = float(opp.get("amount") or 0) * float(opp.get("potential_score") or 0)
     if result.get("credit_nature") == "alimentar":
         score *= 1.10
-    if result.get("legal_preference"):
-        score *= 1.15
     if opp.get("datajud_signal"):
         score *= 1.05
     if result.get("third_party_interest"):
@@ -218,8 +230,6 @@ def format_alert_compact(opp: dict, position: int | None = None, total: int | No
     tags = []
     if result.get("credit_nature") == "alimentar":
         tags.append("Alimentar")
-    if result.get("legal_preference"):
-        tags.append(str(result["legal_preference"])[:40])
     lines = [f"<b>{e(title)}</b>",
              f"<b>{e(brl(opp['amount']))}</b> · {e(tipo)} · {e(tribunal)}"]
     if tags:
@@ -240,7 +250,7 @@ def format_alert_compact(opp: dict, position: int | None = None, total: int | No
 
 SHEET_HEADERS = (
     "Aprovado em", "Aprovado por", "Nota ASPIN (0-10)", "Valor (R$)", "Credor", "Devedor", "Tribunal", "Tipo",
-    "Processo", "Natureza", "Preferência legal", "Terceiro interessado", "Confirmado DataJud",
+    "Processo", "Data de expedição (ofício)", "Data base", "Natureza", "Preferência legal", "Terceiro interessado", "Confirmado DataJud",
     "Critérios atendidos", "Confiança IA", "Comissão estimada (R$)", "Honorários destacados (R$)",
     "Nº requisição", "Classe", "Órgão julgador", "Processo referência", "Assunto", "Trânsito em julgado",
     "Fonte", "Publicação (trecho)", "ID interno",
@@ -270,6 +280,8 @@ def _sheet_values(opp: dict) -> dict:
         "Valor (R$)": round(amount, 2),
         "Natureza": {"alimentar": "Alimentar", "comum": "Comum"}.get(result.get("credit_nature"), ""),
         "Preferência legal": result.get("legal_preference") or "",
+        "Data de expedição (ofício)": result.get("issued_at") or "",
+        "Data base": result.get("base_date") or "",
         "Credor": opp.get("beneficiary") or "",
         "Devedor": opp.get("debtor_entity") or "",
         "Classe": result.get("process_class") or "",
@@ -620,6 +632,8 @@ async def _process_queue(metrics: dict, errors: list[str]):
                     break
             ai_calls += 1
             metrics["classified"] += 1
+            if isinstance(result, dict) and doc.get("published_at"):
+                result.setdefault("published_at", str(doc.get("published_at")))
             if result.get("error"):
                 metrics["ai_failed"] = metrics.get("ai_failed", 0) + 1
                 reason = str(result.get("reason") or "provedores indisponíveis")[:240]

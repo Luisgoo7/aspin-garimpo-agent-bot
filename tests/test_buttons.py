@@ -17,7 +17,8 @@ def test_compact_alert_is_short_and_clean():
     lines = msg.splitlines()
     assert lines[0] == "<b>💼 Oportunidade 2/3 · 18h</b>"
     assert lines[1] == "<b>R$ 300.000,00</b> · Precatório · TRF1"
-    assert "Alimentar · Idosos a partir de 60 anos" in msg and "Credor Exemplo → União Federal" in msg
+    assert "Alimentar" in lines and "Idosos" not in msg  # preferência não entra na mensagem (critério da cliente)
+    assert "Credor Exemplo → União Federal" in msg
     assert len(lines) <= 9 and "Honorários" not in msg  # detalhes vão para a planilha
     ceded = oficio_opp(classification=dict(oficio_opp()["classification"], third_party_interest=True))
     assert "verificar cessão" in worker.format_alert_compact(ceded)
@@ -33,7 +34,7 @@ def test_sheet_row_has_every_column_of_the_spreadsheet():
     assert list(row) == HEADERS
     assert row["Aprovado em"] == "19/10/2026 12:00" and row["Valor (R$)"] == 300000.0
     assert row["Natureza"] == "Alimentar" and row["Comissão estimada (R$)"] == 15000.0
-    assert row["Nota ASPIN (0-10)"] == 8 and row["Confiança IA"] == 0.9  # sem DataJud: 10 - 2
+    assert row["Nota ASPIN (0-10)"] == 7 and row["Confiança IA"] == 0.9  # sem DataJud e sem data de publicação
     assert "Natureza alimentar" in row["Critérios atendidos"] and "DataJud" not in row["Critérios atendidos"]
 
 
@@ -259,13 +260,14 @@ async def test_dispatch_uses_github_api_with_job_token(monkeypatch):
 
 
 def test_nota_aspin_is_explainable():
-    nota, items = worker.nota_aspin(dict(oficio_opp(), datajud_signal={"published_at": None}))
+    recent = dict(oficio_opp()["classification"], published_at=datetime.now(timezone.utc).isoformat())
+    nota, items = worker.nota_aspin(dict(oficio_opp(classification=recent), datajud_signal={"published_at": None}))
     assert nota == 10 and all(ok for _, _, ok, _ in items)
     ceded = dict(oficio_opp(classification=dict(oficio_opp()["classification"], third_party_interest=True,
                                                  credit_nature="comum", legal_preference=None)))
     assert worker.nota_aspin(ceded)[0] == 4  # valor + expedido
     msg = worker.format_alert_compact(oficio_opp())
-    assert "⭐ <b>Nota ASPIN 8/10</b>" in msg.splitlines()
+    assert "⭐ <b>Nota ASPIN 7/10</b>" in msg.splitlines()
     assert "IA 90%" not in msg and "✅" not in msg and "▫️" not in msg  # notificação mostra só a nota
 
 
@@ -275,12 +277,12 @@ async def test_format_is_never_sent_to_old_script(monkeypatch):
     monkeypatch.setattr(settings, "sheets_webhook_url", "https://script.google.com/macros/s/x/exec")
     monkeypatch.setattr(settings, "sheets_token", "t")
     posts = []
-    monkeypatch.setattr(sheets, "script_version", AsyncMock(return_value=1))
+    monkeypatch.setattr(sheets, "script_version", AsyncMock(return_value=sheets.LAYOUT_VERSION - 1))
     monkeypatch.setattr(sheets, "_post", AsyncMock(side_effect=lambda *a, **k: posts.append(a) or True))
     with pytest.raises(sheets.SheetsError, match="desatualizado"):
         await sheets.format_sheet()
     assert posts == []
-    monkeypatch.setattr(sheets, "script_version", AsyncMock(return_value=2))
+    monkeypatch.setattr(sheets, "script_version", AsyncMock(return_value=sheets.LAYOUT_VERSION))
     assert await sheets.format_sheet() is True and posts[0][0]["action"] == "format"
 
 
@@ -294,3 +296,30 @@ async def test_layout_is_formatted_once_per_version(monkeypatch, telegram_fakes)
     first = await worker.process_buttons()
     second = await worker.process_buttons()
     assert first.get("sheet_formatted") and not second.get("sheet_formatted") and fmt.await_count == 1
+
+
+
+def test_client_criteria_total_amount_and_dates():
+    from app.llm import LLMClassifier
+    text = ("Valor Total do Beneficiário: R$ 338.813,79. VALOR TOTAL REQUISITADO (R$): 423.517,23. "
+            "Data de Cadastro da Req: 05/11/2025. Data base 01/08/2025. Honorários R$ 84.703,44.")
+    raw = {"is_opportunity": True, "potential_score": 0.9, "reason": "ok", "requisition_type": "precatorio",
+           "evidence_quote": "VALOR TOTAL REQUISITADO (R$): 423.517,23", "amount": "423.517,23",
+           "amount_basis": "total", "issued_at": "05/11/2025", "base_date": "01/08/2025",
+           "contractual_fees_amount": "84.703,44", "third_party_interest": False}
+    result = LLMClassifier()._normalize(raw, text)
+    assert result["amount"] == 423517.23 and result["amount_basis"] == "total"
+    assert result["issued_at"] == "05/11/2025" and result["base_date"] == "01/08/2025"
+    row = worker.sheet_row(dict(oficio_opp(), classification=dict(oficio_opp()["classification"], **result)))
+    assert row["Data de expedição (ofício)"] == "05/11/2025" and row["Data base"] == "01/08/2025"
+
+
+def test_preference_no_longer_boosts_ranking():
+    base = oficio_opp()
+    without = oficio_opp(id="sem", classification=dict(base["classification"], legal_preference=None))
+    assert worker.rank_score(base) == worker.rank_score(without)
+
+
+def test_minimum_ticket_is_150k():
+    from app.config import Settings
+    assert Settings(_env_file=None).min_opportunity_amount == 150000

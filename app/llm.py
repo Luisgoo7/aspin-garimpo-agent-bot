@@ -40,14 +40,18 @@ requisitado/expedido que possa ser enriquecido depois.
 
 O campo amount deve ser exclusivamente um valor monetário que apareça no texto. Nunca calcule,
 invente ou deduza valor. Normalize valores brasileiros (R$ 1.234,56) para número finito em reais.
-Se houver principal e honorários separados, selecione somente o valor PRINCIPAL do beneficiário.
-NUNCA some principal e honorários, nem some valores de diferentes beneficiários. O número final
-precisa aparecer literalmente no texto. Datas de movimentação não são datas de expedição:
+Critério da ASPIN: o valor que importa é o VALOR TOTAL REQUISITADO (ex.: "valor total requisitado",
+"valor total", "total da requisição"), que já inclui principal, juros e honorários. Se o texto trouxer
+esse total, use-o. Se trouxer só valores parciais, use o maior valor requisitado que apareça escrito.
+NUNCA some valores você mesmo, nem some valores de diferentes beneficiários. O número final
+precisa aparecer literalmente no texto. Se os honorários estiverem destacados, informe-os em
+contractual_fees_amount (sem descontá-los do total). Datas de movimentação não são datas de expedição:
 issued_at e deadline_at devem ser null quando sua associação não estiver expressa.
 Se não houver valor explícito, use null. amount_basis distingue o que o texto realmente diz:
-principal, bruto, liquido ou nao_informado. Use liquido somente se o texto disser que o valor é
-líquido ou equivalente após descontos; não rotule todos os valores como líquidos. Use bruto ou
-principal somente quando houver essa indicação explícita. Caso contrário, use nao_informado.
+total, principal, bruto, liquido ou nao_informado. Use total quando o texto chamar o valor de total
+(ex.: "valor total requisitado"). Use liquido somente se o texto disser que o valor é líquido ou
+equivalente após descontos. Use bruto ou principal somente quando houver essa indicação explícita.
+Caso contrário, use nao_informado.
 
 Responda somente JSON válido, sem markdown, no formato:
 {
@@ -55,7 +59,7 @@ Responda somente JSON válido, sem markdown, no formato:
   "need_enrichment": boolean,
   "requisition_type": "oficio_requisitorio|rpv|precatorio|outro|null",
   "amount": number|null,
-  "amount_basis": "principal|bruto|liquido|nao_informado",
+  "amount_basis": "total|principal|bruto|liquido|nao_informado",
   "beneficiary": string|null,
   "debtor_entity": string|null,
   "lawyer": string|null,
@@ -73,6 +77,7 @@ Responda somente JSON válido, sem markdown, no formato:
   "legal_preference": string|null,
   "contractual_fees_amount": number|null,
   "res_judicata_date": string|null,
+  "base_date": string|null,
   "third_party_interest": boolean
 }
 Campos do ofício (todos opcionais, só se estiverem LITERALMENTE no texto; senão null):
@@ -82,7 +87,8 @@ reference_process = processo de referência/ação originária; subject = assunt
 obrigação; credit_nature = alimentar quando o texto disser natureza alimentar, comum quando disser
 comum; legal_preference = preferência legal (idoso, doença grave, deficiência);
 contractual_fees_amount = honorários contratuais destacados; res_judicata_date = data do trânsito
-em julgado; third_party_interest = true se houver FIDC, fundo, banco, cessionário ou cessão de
+em julgado; issued_at = data de expedição/cadastro do ofício requisitório (dd/mm/aaaa);
+base_date = data base do cálculo/atualização do valor (ex.: "atualizado até", "data base"); third_party_interest = true se houver FIDC, fundo, banco, cessionário ou cessão de
 crédito citados como terceiro interessado (indica possível cessão já feita).
 potential_score deve ser um número finito entre 0 e 1; se usar percentual, informe 0 a 100.
 O evidence_quote deve ser uma cópia curta, literal, CONTÍNUA e decisiva do texto, sem reticências,
@@ -259,6 +265,8 @@ def _normalize_requisition_type(valor: Any) -> str | None:
 
 def _normalize_amount_basis(valor: Any) -> str:
     token = _sem_acentos(valor).replace("-", " ").replace("_", " ")
+    if re.search(r"\btotal\b", token):
+        return "total"
     if re.search(r"\bliquid(?:o|a|os|as)\b", token) or "apos desconto" in token or "apos deduc" in token:
         return "liquido"
     if "brut" in token:
@@ -318,6 +326,8 @@ def _basis_is_supported(basis: str, texto: Any) -> bool:
         return bool(re.search(r"\bbrut\w*\b", normalizado))
     if basis == "principal":
         return bool(re.search(r"\bprincipal\b", normalizado))
+    if basis == "total":
+        return bool(re.search(r"\btotal\b", normalizado))
     return False
 
 
@@ -487,7 +497,7 @@ class LLMClassifier:
         normalized["reason"] = _limpar_texto(result.get("reason"))
         normalized["evidence_quote"] = _limpar_texto(result.get("evidence_quote"))
         for campo in ("requisition_number", "process_class", "court_body", "reference_process",
-                      "subject", "legal_preference", "res_judicata_date"):
+                      "subject", "legal_preference", "res_judicata_date", "base_date", "issued_at"):
             valor = _limpar_texto(result.get(campo)) if result.get(campo) not in (None, "", "null") else None
             normalized[campo] = valor[:200] if valor else None
         natureza = _sem_acentos(result.get("credit_nature") or "").casefold()
