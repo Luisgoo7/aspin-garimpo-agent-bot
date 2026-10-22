@@ -1,4 +1,5 @@
 import re
+from urllib.parse import quote
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -17,6 +18,26 @@ DEFAULT_DATAJUD_TRIBUNALS = ",".join(
 
 
 DATABASE_URL_NORMALIZED = [False]
+
+# Caracteres que quebram a URI se aparecerem crus na senha (o % só quando não é um %XX válido).
+_RESERVED_IN_PASSWORD = re.compile(r"[@/#?\[\]]|%(?![0-9A-Fa-f]{2})")
+
+
+def _encode_password(dsn: str) -> str:
+    """Codifica a senha (@ vira %40 etc.) quando foi colada crua na URI.
+
+    O último @ antes do host separa as credenciais; usuário vai até o primeiro ':'.
+    Senha já codificada (só %XX) fica como está.
+    """
+    scheme, sep, rest = dsn.partition("://")
+    at = rest.rfind("@")
+    if not sep or at < 0:
+        return dsn
+    userinfo, hostpart = rest[:at], rest[at + 1:]
+    user, colon, password = userinfo.partition(":")
+    if not colon or not _RESERVED_IN_PASSWORD.search(password):
+        return dsn
+    return f"{scheme}://{user}:{quote(password, safe='')}@{hostpart}"
 
 
 class Settings(BaseSettings):
@@ -107,7 +128,7 @@ class Settings(BaseSettings):
         cleaned = re.sub(r"\s+", "", text)
         if cleaned != text.strip():
             DATABASE_URL_NORMALIZED[0] = True
-        return cleaned
+        return _encode_password(cleaned)
 
     def configuration_errors(self) -> list[str]:
         errors = []
