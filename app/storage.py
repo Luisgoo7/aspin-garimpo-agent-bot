@@ -480,6 +480,7 @@ def finish_run(run_id, outcome: str, metrics: dict, errors: list[str]):
 # ---------------------------------------------------------------------------
 RETENTION_TABLES = ("source_documents", "opportunities", "evidence", "processes", "audit_log", "collection_runs",
                     "opportunity_tombstones")
+RETENTION_BATCH = 2000
 TERMINAL_DOC_STATUSES = ("ignored", "below_minimum", "needs_enrichment", "rejected", "expired", "failed", "cancelled")
 
 
@@ -487,10 +488,12 @@ def _maintenance_connection():
     """Autocommit + sai do modo 'somente leitura' que o Supabase aplica ao passar do limite de disco."""
     conn = connect()
     conn.autocommit = True
-    try:
-        conn.execute("set session characteristics as transaction read write")
-    except psycopg.Error:
-        pass
+    for statement in ("set session characteristics as transaction read write",
+                      "set statement_timeout = 0"):  # limpeza e VACUUM FULL podem levar minutos
+        try:
+            conn.execute(statement)
+        except psycopg.Error:
+            pass
     return conn
 
 
@@ -531,16 +534,25 @@ def retention_cleanup(hours: int) -> dict:
         run("processos_removidos", """delete from public.processes p where not exists
             (select 1 from public.opportunities o where o.process_id = p.id)
             and p.created_at < now() - make_interval(hours => %s)""", (hours,))
-        run("publicacoes_expiradas", """update public.source_documents set processing_status = 'expired'
-            where first_seen_at < now() - make_interval(hours => %s)
-            and processing_status in ('pending', 'retry', 'processing')""", (hours,))
-        run("publicacoes_removidas", """delete from public.source_documents
-            where first_seen_at < now() - make_interval(hours => %s)
-            and processing_status = any(%s)""", (hours, list(TERMINAL_DOC_STATUSES)))
-        run("publicacoes_compactadas", """update public.source_documents
-            set text_excerpt = null, raw_data = '{}'::jsonb, classification = null, title = null, last_error = null
-            where first_seen_at < now() - make_interval(hours => %s)
-            and (text_excerpt is not null or raw_data <> '{}'::jsonb)""", (hours,))
+        # Publicações: em lotes, para cada comando caber no tempo limite do Supabase.
+        def batched(key, action_sql, where_sql, params):
+            total = 0
+            while True:
+                done = conn.execute(f"""{action_sql} where id in (select id from public.source_documents
+                    where {where_sql} limit {RETENTION_BATCH})""", params).rowcount
+                total += done
+                if done < RETENTION_BATCH:
+                    break
+            counts[key] = total
+
+        old = "first_seen_at < now() - make_interval(hours => %s)"
+        batched("publicacoes_expiradas", "update public.source_documents set processing_status = 'expired'",
+                f"{old} and processing_status in ('pending', 'retry', 'processing')", (hours,))
+        batched("publicacoes_removidas", "delete from public.source_documents",
+                f"{old} and processing_status = any(%s)", (hours, list(TERMINAL_DOC_STATUSES)))
+        batched("publicacoes_compactadas", """update public.source_documents set text_excerpt = null,
+                raw_data = '{}'::jsonb, classification = null, title = null, last_error = null""",
+                f"{old} and (text_excerpt is not null or raw_data <> '{{}}'::jsonb)", (hours,))
         run("auditoria_removida", "delete from public.audit_log where created_at < now() - interval '7 days'")
         run("rastros_antigos_removidos",
             "delete from public.opportunity_tombstones where created_at < now() - interval '365 days'")
