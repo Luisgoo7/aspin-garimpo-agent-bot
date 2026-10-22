@@ -32,11 +32,12 @@ jobs:
       SHEETS_WEBHOOK_URL: ${{ secrets.SHEETS_WEBHOOK_URL }}
       SHEETS_TOKEN: ${{ secrets.SHEETS_TOKEN }}
       TELEGRAM_APPROVERS: ${{ vars.TELEGRAM_APPROVERS || '' }}
-      DATAJUD_TRIBUNALS: ${{ vars.DATAJUD_TRIBUNALS || 'todos' }}   # todos os 27 TJs + 6 TRFs
-      DJEN_TRIBUNALS: ${{ vars.DJEN_TRIBUNALS || '' }}
+      # Foco da ASPIN: TJSP e TJPA (estaduais), Justiça Federal e TRT2.
+      DATAJUD_TRIBUNALS: ${{ vars.DATAJUD_TRIBUNALS || 'api_publica_tjsp,api_publica_tjpa,api_publica_trf1,api_publica_trf2,api_publica_trf3,api_publica_trf4,api_publica_trf5,api_publica_trf6,api_publica_trt2' }}
+      DJEN_TRIBUNALS: ${{ vars.DJEN_TRIBUNALS || 'TJSP,TJPA,TRF1,TRF2,TRF3,TRF4,TRF5,TRF6,TRT2' }}
       ENABLE_DJEN: ${{ vars.ENABLE_DJEN || 'false' }}
       MIN_CONFIDENCE: '0.78'
-      MIN_OPPORTUNITY_AMOUNT: '100000'
+      MIN_OPPORTUNITY_AMOUNT: '150000'   # ticket mínimo da ASPIN
       ASPIN_COMMISSION_RATE: '0.05'
       POLL_INTERVAL_MINUTES: '60'
       STATUS_INTERVAL_MINUTES: '360'

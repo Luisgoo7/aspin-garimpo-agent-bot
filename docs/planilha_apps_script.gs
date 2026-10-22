@@ -15,21 +15,23 @@ const TOKEN = 'COLE_AQUI_O_TOKEN';
 // Ordem das colunas (igual à do bot). Colunas antigas são reorganizadas automaticamente.
 const HEADERS = [
   'Aprovado em', 'Aprovado por', 'Nota ASPIN (0-10)', 'Valor (R$)', 'Credor', 'Devedor', 'Tribunal', 'Tipo',
-  'Processo', 'Natureza', 'Preferência legal', 'Terceiro interessado', 'Confirmado DataJud',
+  'Processo', 'Data de expedição (ofício)', 'Data base', 'Natureza', 'Preferência legal', 'Terceiro interessado', 'Confirmado DataJud',
   'Critérios atendidos', 'Confiança IA', 'Comissão estimada (R$)', 'Honorários destacados (R$)',
   'Nº requisição', 'Classe', 'Órgão julgador', 'Processo referência', 'Assunto', 'Trânsito em julgado',
   'Fonte', 'Publicação (trecho)', 'ID interno'
 ];
 // Colunas que devem ficar como texto (número de processo começa com zero).
-const TEXT_COLUMNS = ['Processo', 'Nº requisição', 'Processo referência', 'ID interno', 'Aprovado em'];
+const TEXT_COLUMNS = ['Processo', 'Nº requisição', 'Processo referência', 'ID interno', 'Aprovado em',
+  'Data de expedição (ofício)', 'Data base'];
 const MONEY_COLUMNS = ['Valor (R$)', 'Comissão estimada (R$)', 'Honorários destacados (R$)'];
 const WRAP_COLUMNS = ['Credor', 'Devedor', 'Critérios atendidos', 'Classe', 'Órgão julgador', 'Assunto',
   'Publicação (trecho)', 'Preferência legal', 'Terceiro interessado', 'Tipo'];
 const CENTER_COLUMNS = ['Aprovado em', 'Nota ASPIN (0-10)', 'Tribunal', 'Natureza', 'Confirmado DataJud',
+  'Data de expedição (ofício)', 'Data base',
   'Confiança IA', 'Trânsito em julgado', 'Fonte'];
 const WIDTHS = {
   'Aprovado em': 125, 'Aprovado por': 140, 'Nota ASPIN (0-10)': 95, 'Valor (R$)': 130, 'Credor': 240,
-  'Devedor': 240, 'Tribunal': 75, 'Tipo': 140, 'Processo': 190, 'Natureza': 95, 'Preferência legal': 150,
+  'Devedor': 240, 'Tribunal': 75, 'Tipo': 140, 'Processo': 190, 'Data de expedição (ofício)': 120, 'Data base': 105, 'Natureza': 95, 'Preferência legal': 150,
   'Terceiro interessado': 160, 'Confirmado DataJud': 105, 'Critérios atendidos': 260, 'Confiança IA': 95,
   'Comissão estimada (R$)': 140, 'Honorários destacados (R$)': 150, 'Nº requisição': 170, 'Classe': 220,
   'Órgão julgador': 220, 'Processo referência': 190, 'Assunto': 180, 'Trânsito em julgado': 115,
@@ -77,7 +79,7 @@ function doPost(e) {
 }
 
 function doGet() {
-  return reply_({ ok: true, service: 'aspin-planilha', version: 2 });
+  return reply_({ ok: true, service: 'aspin-planilha', version: 3 });
 }
 
 /** Executável pelo editor ou pelo menu ASPIN. */
@@ -113,6 +115,9 @@ function ensureLayout_(sheet) {
         if (h === 'Confiança') {  // coluna antiga em texto ("90%") vira número
           h = 'Confiança IA';
           v = typeof v === 'string' && v.indexOf('%') >= 0 ? parseFloat(v) / 100 : v;
+        }
+        if (v instanceof Date) {  // datas antigas gravadas como objeto viram texto dd/mm/aaaa hh:mm
+          v = Utilities.formatDate(v, Session.getScriptTimeZone(), 'dd/MM/yyyy HH:mm');
         }
         obj[h] = v;
       });
