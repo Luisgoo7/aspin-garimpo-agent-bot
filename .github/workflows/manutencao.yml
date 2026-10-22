@@ -1,0 +1,70 @@
+name: Manutenção do banco (retenção 48h)
+
+# Apaga o que passou de 48 h (aprovadas só depois de gravadas na planilha), guarda o rastro
+# mínimo para não renotificar e compacta o banco (VACUUM FULL) para o Supabase liberar o disco.
+# O robô sempre ligado também faz a limpeza leve de hora em hora.
+on:
+  schedule:
+    - cron: '30 7 * * *'   # 04h30 em Brasília
+  workflow_dispatch:
+
+concurrency:
+  group: aspin-manutencao
+  cancel-in-progress: false
+
+jobs:
+  manutencao:
+    name: Retenção 48h e compactação
+    runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      APP_ENV: production
+      LOG_LEVEL: INFO
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      DATAJUD_API_KEY: ${{ secrets.DATAJUD_API_KEY }}
+      SHEETS_WEBHOOK_URL: ${{ secrets.SHEETS_WEBHOOK_URL }}
+      SHEETS_TOKEN: ${{ secrets.SHEETS_TOKEN }}
+      TELEGRAM_APPROVERS: ${{ vars.TELEGRAM_APPROVERS || '' }}
+      DATAJUD_TRIBUNALS: ${{ vars.DATAJUD_TRIBUNALS || 'todos' }}   # todos os 27 TJs + 6 TRFs
+      DJEN_TRIBUNALS: ${{ vars.DJEN_TRIBUNALS || '' }}
+      ENABLE_DJEN: ${{ vars.ENABLE_DJEN || 'false' }}
+      MIN_CONFIDENCE: '0.78'
+      MIN_OPPORTUNITY_AMOUNT: '150000'   # ticket mínimo da ASPIN
+      ASPIN_COMMISSION_RATE: '0.05'
+      POLL_INTERVAL_MINUTES: '60'
+      STATUS_INTERVAL_MINUTES: '360'
+      INITIAL_LOOKBACK_DAYS: '7'
+      INCREMENTAL_LOOKBACK_MINUTES: '120'
+      MAX_CLASSIFY_PER_CYCLE: '25'
+      DIGEST_HOURS: '8,12,18'
+      DIGEST_TOP_N: '3'
+      STATUS_TELEGRAM: failures
+      DJEN_PAGE_SIZE: '100'
+      DJEN_MAX_PAGES: '30'
+      DJEN_MAX_DOCUMENTS: '4000'
+      DJEN_MAX_REQUESTS: '80'
+      DATAJUD_PAGE_SIZE: '100'
+      DATAJUD_MAX_PAGES: '2'
+      AI_TIME_BUDGET_SECONDS: '900'
+      DATAJUD_TIME_BUDGET_SECONDS: '420'
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Importar configuração protegida
+        env:
+          ASPIN_CONFIG_BUNDLE: ${{ secrets.ASPIN_ENV || secrets.ACCS }}
+        run: python .github/scripts/import_config.py
+      - name: Retenção 48h + compactação
+        run: python -m app.worker --maintenance
