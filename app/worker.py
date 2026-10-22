@@ -1250,7 +1250,13 @@ def main():
             require_configuration()
             storage.ensure_schema()
             before = storage.database_size_report()
-            report = asyncio.run(retention_job(vacuum_full=True))
+            try:
+                report = asyncio.run(retention_job(vacuum_full=True))
+            except Exception as exc:
+                # Mensagem do Postgres (sem DSN nem credenciais) ajuda a saber o que travou.
+                detail = str(exc).strip().splitlines()[0][:200] if str(exc).strip() else ""
+                log.error("Manutenção falhou: %s %s", type(exc).__name__, detail)
+                raise
             after = storage.database_size_report()
             result = {"antes": before, "retencao": report, "depois": after}
             print(json.dumps(result, ensure_ascii=False, default=str))
