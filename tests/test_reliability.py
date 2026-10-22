@@ -670,3 +670,11 @@ async def test_slow_ai_call_never_exceeds_cycle_deadline(monkeypatch):
     errors = []
     await asyncio.wait_for(worker._process_queue(metrics, errors), timeout=3)
     assert finished == [("retry", "prazo_do_ciclo")] and not errors and metrics["ai_budget_exhausted"]
+
+
+def test_unknown_error_shows_sanitized_server_message():
+    exc = psycopg.OperationalError('connection to server at "aws-1-ca-central-1.pooler.supabase.com" (3.97.240.24), '
+                                   'port 5432 failed: FATAL:  The database system is in recovery mode')
+    text = dbcheck.format_diagnosis(dbcheck.diagnose(POOLER, exc))
+    assert "recovery mode" in text and "3.97.240.24" not in text and "pooler.supabase.com\"" not in text
+    assert SECRET not in text

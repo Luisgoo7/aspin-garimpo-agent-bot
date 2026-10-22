@@ -161,6 +161,8 @@ def diagnose(dsn: str, exc: BaseException | None = None) -> dict:
         result["erro"] = type(exc).__name__
         result["categoria"] = category
         result["dica"] = hint
+        if category == "desconhecido":
+            result["detalhe"] = sanitized_detail(exc)
     # Sinais fortes que não dependem da mensagem do driver.
     if target.get("formato") == "url_rest_em_vez_de_postgres":
         result["categoria"] = "url_rest_em_vez_de_postgres"
@@ -199,6 +201,20 @@ def format_diagnosis(diag: dict) -> str:
         text += f" | causa={diag['categoria']}"
     if diag.get("erro"):
         text += f" ({diag['erro']})"
+    if diag.get("detalhe"):
+        text += f" | mensagem do servidor: {diag['detalhe']}"
     if diag.get("dica"):
         text += f" | como corrigir: {diag['dica']}"
     return text
+
+
+def sanitized_detail(exc: BaseException) -> str:
+    """Primeira frase do erro do servidor, sem host, IP, porta ou usuário."""
+    raw = str(exc).strip()
+    text = raw.splitlines()[0] if raw else ""
+    text = re.sub(r'"[^"]*"', '"…"', text)                      # host, usuário, banco entre aspas
+    text = re.sub(r"\(\s*[0-9a-fA-F:.]+\s*\)", "(…)", text)     # IPs entre parênteses
+    text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "…", text)    # IPv4 soltos
+    text = re.sub(r"[a-z0-9.-]+\.supabase\.(?:co|com)", "…", text)
+    text = re.sub(r"port \d+", "port …", text)
+    return text[:180]
