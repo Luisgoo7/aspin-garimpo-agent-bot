@@ -521,7 +521,7 @@ def retention_cleanup(hours: int) -> dict:
         expired = """from public.opportunities o join public.processes p on p.id = o.process_id
             join public.tribunals t on t.id = p.tribunal_id
             where o.created_at < now() - make_interval(hours => %s)
-            and not (o.decision = 'aprovada' and o.sheet_synced_at is null)"""
+            and not (coalesce(o.decision, '') = 'aprovada' and o.sheet_synced_at is null)"""
         run("rastros_gravados", f"""insert into public.opportunity_tombstones(key)
             select distinct {TOMBSTONE_SQL} {expired} on conflict (key) do nothing""", (hours,))
         run("oportunidades_removidas", f"""delete from public.opportunities where id in (select o.id {expired})""", (hours,))
