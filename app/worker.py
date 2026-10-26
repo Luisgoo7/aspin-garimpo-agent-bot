@@ -15,6 +15,8 @@ from .llm import LLMClassifier, _AMOUNT_CONTEXT_RE, _normalize_amount
 from .opportunity import KEYWORDS, focus_excerpt, max_amount_in_text, canonical_alias, canonical_cnj, clean_text, parse_amount
 from .sources import search_djen, probe_tjsp_pages
 import html as _html
+import re
+from urllib.parse import urlparse
 
 from . import consulta, sheets
 from .telegram_bot import (APPROVE, DISCARD, TelegramError, answer_callback, decided_keyboard,
@@ -165,7 +167,7 @@ def format_alert(opp: dict, position: int | None = None, total: int | None = Non
     signal = opp.get("datajud_signal") or {}
     meta = signal.get("raw_data", {}).get("metadata", {}) if isinstance(signal.get("raw_data"), dict) else {}
     tribunal = str(opp.get("alias") or "não informado").removeprefix("api_publica_").upper()
-    url = opp.get("document_url") or opp.get("source_url") or "Link não fornecido pela fonte"
+    url = source_url(opp) or "Link não fornecido pela fonte"
     basis = {"principal": "principal", "bruto": "bruto", "liquido": "líquido"}.get(result.get("amount_basis"), "base não informada")
     tipo = {"oficio_requisitorio": "Ofício requisitório", "precatorio": "Precatório", "rpv": "RPV"}.get(
         opp.get("requisition_type"), _v(opp.get("requisition_type")))
@@ -242,8 +244,8 @@ def format_alert_compact(opp: dict, position: int | None = None, total: int | No
     lines.append(f"⭐ <b>Nota ASPIN {nota}/10</b>")
     if result.get("third_party_interest"):
         lines.append("⚠️ FIDC/banco citado — verificar cessão")
-    url = opp.get("document_url") or opp.get("source_url")
-    if url and str(url).startswith("http"):
+    url = source_url(opp)
+    if url:
         lines.append(f'🔗 <a href="{e(str(url), quote=True)}">Ver publicação</a>')
     return "\n".join(lines)[:4000]
 
@@ -257,9 +259,31 @@ SHEET_HEADERS = (
 )
 
 
+# Fora das colunas: o script da planilha usa para tornar o nº do Processo clicável.
+SHEET_PROCESS_LINK = "Link do processo"
+
+
+def process_url(cnj) -> str:
+    """Consulta pública do CNJ (comunica.pje.jus.br) pelo número do processo; vale para todo tribunal."""
+    digits = re.sub(r"\D", "", str(cnj or ""))
+    return f"https://comunica.pje.jus.br/consulta?numeroProcesso={digits}" if len(digits) == 20 else ""
+
+
+def source_url(opp: dict) -> str:
+    """Link da publicação. Se a fonte só deu a página inicial do diário (ex.: DJE do TJSP), usa a consulta do processo."""
+    url = str(opp.get("document_url") or opp.get("source_url") or "").strip()
+    if not url.startswith("http"):
+        return process_url(opp.get("cnj_number"))
+    parsed = urlparse(url)
+    if parsed.path.strip("/") == "" and not parsed.query:
+        return process_url(opp.get("cnj_number")) or url
+    return url
+
+
 def sheet_row(opp: dict) -> dict:
     row = _sheet_values(opp)
-    return {header: row.get(header, "") for header in SHEET_HEADERS}
+    return {**{header: row.get(header, "") for header in SHEET_HEADERS},
+            SHEET_PROCESS_LINK: process_url(opp.get("cnj_number"))}
 
 
 def _sheet_values(opp: dict) -> dict:
@@ -296,7 +320,7 @@ def _sheet_values(opp: dict) -> dict:
         "Confiança IA": round(float(opp.get("potential_score") or 0), 4),
         "Comissão estimada (R$)": round(amount * settings.aspin_commission_rate, 2),
         "Confirmado DataJud": "Sim" if opp.get("datajud_signal") else "Não",
-        "Fonte": opp.get("document_url") or opp.get("source_url") or "",
+        "Fonte": source_url(opp),
         "Publicação (trecho)": str(opp.get("text_excerpt") or result.get("evidence_quote") or "")[:1500],
         "ID interno": str(opp.get("id") or ""),
     }

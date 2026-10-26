@@ -31,11 +31,21 @@ def test_compact_alert_escapes_html():
 
 def test_sheet_row_has_every_column_of_the_spreadsheet():
     row = worker.sheet_row(dict(oficio_opp(), decided_by="Ana", decided_at=datetime(2026, 10, 19, 15, 0, tzinfo=timezone.utc)))
-    assert list(row) == HEADERS
+    assert list(row) == HEADERS + [worker.SHEET_PROCESS_LINK]
     assert row["Aprovado em"] == "19/10/2026 12:00" and row["Valor (R$)"] == 300000.0
     assert row["Natureza"] == "Alimentar" and row["Comissão estimada (R$)"] == 15000.0
     assert row["Nota ASPIN (0-10)"] == 7 and row["Confiança IA"] == 0.9  # sem DataJud e sem data de publicação
     assert "Natureza alimentar" in row["Critérios atendidos"] and "DataJud" not in row["Critérios atendidos"]
+
+
+def test_sheet_row_links_the_process_to_the_cnj_public_search():
+    row = worker.sheet_row(dict(oficio_opp(), cnj_number="00220908220188260224", document_url="https://www.dje.tjsp.jus.br"))
+    link = "https://comunica.pje.jus.br/consulta?numeroProcesso=00220908220188260224"
+    assert row[worker.SHEET_PROCESS_LINK] == link
+    assert row["Fonte"] == link  # página inicial do diário não é link da publicação
+    doc = "https://pje1g.trf3.jus.br:443/pje/Processo/ConsultaDocumento/listView.seam?x=261014"
+    assert worker.sheet_row(dict(oficio_opp(), document_url=doc))["Fonte"] == doc
+    assert worker.process_url("123") == ""
 
 
 def test_apps_script_uses_the_same_columns_as_the_spreadsheet():
