@@ -79,7 +79,7 @@ function doPost(e) {
 }
 
 function doGet() {
-  return reply_({ ok: true, service: 'aspin-planilha', version: 3 });
+  return reply_({ ok: true, service: 'aspin-planilha', version: 4 });
 }
 
 /** Executável pelo editor ou pelo menu ASPIN. */
@@ -149,13 +149,20 @@ function writeRows_(sheet, rows, startRow) {
     });
   });
   sheet.getRange(startRow, 1, rows.length, HEADERS.length).setValues(values);
-  // Fonte vira link clicável "Abrir publicação".
+  // Fonte vira link clicável "Abrir publicação"; o nº do Processo abre a consulta pública do CNJ.
   const fonteCol = HEADERS.indexOf('Fonte') + 1;
+  const processoCol = HEADERS.indexOf('Processo') + 1;
   rows.forEach(function (row, i) {
     const url = String(row['Fonte'] || '');
     if (url.indexOf('http') === 0) {
       sheet.getRange(startRow + i, fonteCol).setRichTextValue(
         SpreadsheetApp.newRichTextValue().setText('Abrir publicação').setLinkUrl(url).build());
+    }
+    const processoUrl = String(row['Link do processo'] || '');
+    const processo = String(row['Processo'] || '');
+    if (processoUrl.indexOf('http') === 0 && processo) {
+      sheet.getRange(startRow + i, processoCol).setRichTextValue(
+        SpreadsheetApp.newRichTextValue().setText(processo).setLinkUrl(processoUrl).build());
     }
   });
 }

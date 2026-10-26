@@ -12,7 +12,7 @@ def configured() -> bool:
     return bool(settings.sheets_webhook_url.strip() and settings.sheets_token.strip())
 
 
-LAYOUT_VERSION = 3  # v3: colunas Data de expedição (ofício) e Data base
+LAYOUT_VERSION = 4  # v4: nº do Processo vira link para a consulta pública do CNJ
 
 
 async def script_version() -> int:
