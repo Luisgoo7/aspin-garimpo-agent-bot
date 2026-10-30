@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+import unicodedata
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from .config import settings
 from .datajud import DataJudError, collect_expeditions
 from .llm import LLMClassifier, _AMOUNT_CONTEXT_RE, _normalize_amount
 from .opportunity import KEYWORDS, focus_excerpt, max_amount_in_text, canonical_alias, canonical_cnj, clean_text, parse_amount
-from .sources import search_djen, probe_tjsp_pages
+from .sources import djen_row_id, search_djen, search_djen_process, probe_tjsp_pages
 import html as _html
 import re
 from urllib.parse import urlparse
@@ -84,6 +85,17 @@ def decide_outcome(metrics: dict, errors: list[str]) -> str:
     return "success"
 
 
+def datajud_signal(cnj) -> dict | None:
+    """Sinal do DataJud gravado para o processo; None com ENABLE_DATAJUD=false.
+
+    O termo de uso da API pública do DataJud proíbe uso comercial: desligado, o bot
+    não coleta nem usa nada do DataJud (nem o que já estava no banco).
+    """
+    if not settings.enable_datajud:
+        return None
+    return storage.datajud_signal(cnj)
+
+
 def require_configuration():
     missing = settings.configuration_errors()
     if missing:
@@ -94,15 +106,85 @@ def brl(amount) -> str:
     return f"R$ {float(amount):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-# Nota ASPIN: critérios objetivos e verificáveis, somando 10 pontos.
+# Nota ASPIN 2.0: critérios objetivos e verificáveis, somando 10 pontos.
+# Pesos (a versão 1 dava 6 ou 7 a quase tudo, porque valor e expedição quase sempre pontuavam):
+#   valor_alto  1  valor citado >= R$ 500 mil (todo candidato já passa do ticket mínimo)
+#   expedido    1  requisição expedida/ordenada (precatório, RPV, ofício)
+#   datajud     1  expedição confirmada no DataJud (nunca pontua com ENABLE_DATAJUD=false)
+#   sem_cessao  2  sem FIDC/banco/cessionário citado (crédito possivelmente já cedido)
+#   devedor     2  qualidade do devedor: federal (União, INSS, autarquias, TRF) = 2;
+#                  estado, DF ou capital = 1; demais municípios ou não identificado = 0
+#   preferencia 1  superpreferência/preferência legal (idoso, doença grave, deficiência)
+#   alimentar   1  natureza alimentar
+#   recente     1  publicação de até 7 dias (menos concorrência)
 NOTA_CRITERIA = (
-    ("valor", "Valor citado no texto", 2),
-    ("expedido", "Requisição expedida/ordenada", 2),
-    ("datajud", "Expedição confirmada no DataJud", 2),
+    ("valor_alto", "Valor a partir de R$ 500 mil", 1),
+    ("expedido", "Requisição expedida/ordenada", 1),
+    ("datajud", "Expedição confirmada no DataJud", 1),
     ("sem_cessao", "Sem FIDC/banco/cessionário citado", 2),
+    ("devedor", "Devedor federal (União/INSS/autarquia/TRF)", 2),
+    ("preferencia", "Preferência legal (idoso, doença grave, deficiência)", 1),
     ("alimentar", "Natureza alimentar", 1),
     ("recente", "Publicação recente (até 7 dias)", 1),
 )
+NOTA_HIGH_AMOUNT = 500_000
+DEVEDOR_LABELS = {"federal": ("Devedor federal (União/INSS/autarquia/TRF)", 2),
+                  "estadual": ("Devedor estadual, DF ou capital", 1)}
+
+
+def _plain(text) -> str:
+    """Minúsculas sem acento, para as heurísticas de texto."""
+    decomposed = unicodedata.normalize("NFKD", str(text or ""))
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).casefold()
+
+
+_CAPITAIS = ("rio branco", "maceio", "macapa", "manaus", "salvador", "fortaleza", "vitoria", "goiania",
+             "sao luis", "cuiaba", "campo grande", "belo horizonte", "belem", "joao pessoa", "curitiba",
+             "recife", "teresina", "rio de janeiro", "natal", "porto alegre", "porto velho", "boa vista",
+             "florianopolis", "sao paulo", "aracaju", "palmas")
+_FEDERAL_RE = re.compile(
+    r"\buniao\b|fazenda nacional|\binss\b|instituto nacional do seguro social|autarquia federal"
+    r"|fundacao (nacional|federal)|universidade federal|instituto federal|\b(ibama|incra|funai|funasa|dnit|dnocs"
+    r"|anatel|anvisa|aneel|antt|anac|cnen|ibge|inmetro|cade|bacen)\b|banco central do brasil"
+    r"|agencia nacional|departamento nacional|conselho federal")
+_ESTADUAL_RE = re.compile(
+    r"\bestado (de|do|da|dos)\b|fazenda (publica )?(do |da )?estad|governo do estado|distrito federal"
+    r"|\b(spprev|ipesp|iamspe|detran|der|daee|rioprevidencia|igeprev|ipsemg)\b|\bestadual\b")
+_MUNICIPAL_RE = re.compile(r"\bmunicipi|prefeitura|\bmunicipal\b|camara de vereadores")
+_CAPITAL_RE = re.compile(r"\b(municipio|prefeitura)( municipal)?( de| do| da)? (" + "|".join(_CAPITAIS)
+                         + r")\b(?! d[aeo]s? )")
+
+
+def debtor_sphere(debtor, alias=None) -> str | None:
+    """Esfera do devedor pelo nome (e pelo tribunal): federal, estadual (inclui DF e capitais),
+    municipal ou None (não identificado)."""
+    name = _plain(debtor)
+    if name:
+        if _FEDERAL_RE.search(name):
+            return "federal"
+        if _MUNICIPAL_RE.search(name):
+            return "estadual" if _CAPITAL_RE.search(name) else "municipal"
+        if _ESTADUAL_RE.search(name):
+            return "estadual"
+    # Precatório/RPV expedido por TRF tem devedor federal.
+    if str(alias or "").casefold().removeprefix("api_publica_").startswith("trf"):
+        return "federal"
+    return None
+
+
+_PREFERENCIA_RE = re.compile(r"idos|60 anos|80 anos|doenc|molestia|grave|deficien|\bpcd\b|superpref|preferen")
+_SEM_PREFERENCIA_RE = re.compile(r"^\s*(nao|sem|nenhum|inexist|n/?a\b|-)")
+_SUPERPREF_TEXT_RE = re.compile(r"superpreferen|doenca grave|portador(a)? de (doenca|deficiencia)"
+                                r"|pessoa com deficiencia|molestia grave")
+
+
+def has_legal_preference(opp: dict) -> bool:
+    """Preferência legal declarada pela IA ou superpreferência citada na publicação."""
+    result = opp.get("classification") or {}
+    declared = _plain(result.get("legal_preference"))
+    if declared and not _SEM_PREFERENCIA_RE.search(declared) and _PREFERENCIA_RE.search(declared):
+        return True
+    return bool(_SUPERPREF_TEXT_RE.search(_plain(opp.get("text_excerpt"))))
 
 
 def _published_recently(result: dict, opp: dict, days: int) -> bool:
@@ -123,18 +205,27 @@ def nota_aspin(opp: dict) -> tuple[int, list[tuple[str, str, bool, int]]]:
     """(pontos de 0 a 10, [(chave, descrição, atendido, peso)]).
 
     Diferente da confiança da IA (opinião do modelo), cada ponto aqui é um fato
-    conferível na publicação ou no DataJud.
+    conferível na publicação ou no DataJud. No critério do devedor (gradual), o peso
+    do item é o que ele rendeu e a descrição diz a esfera encontrada.
     """
     result = opp.get("classification") or {}
+    amount = float(opp.get("amount") or 0) if opp.get("amount") is not None else 0.0
+    sphere = debtor_sphere(opp.get("debtor_entity"), opp.get("alias"))
     checks = {
-        "valor": opp.get("amount") is not None and float(opp.get("amount") or 0) > 0,
+        "valor_alto": amount >= NOTA_HIGH_AMOUNT,
         "expedido": opp.get("requisition_type") in ("oficio_requisitorio", "precatorio", "rpv"),
         "datajud": bool(opp.get("datajud_signal")),
         "sem_cessao": not result.get("third_party_interest"),
+        "devedor": sphere in DEVEDOR_LABELS,
+        "preferencia": has_legal_preference(opp),
         "alimentar": result.get("credit_nature") == "alimentar",
         "recente": _published_recently(result, opp, days=7),
     }
-    items = [(key, label, checks[key], weight) for key, label, weight in NOTA_CRITERIA]
+    items = []
+    for key, label, weight in NOTA_CRITERIA:
+        if key == "devedor" and sphere in DEVEDOR_LABELS:
+            label, weight = DEVEDOR_LABELS[sphere]
+        items.append((key, label, checks[key], weight))
     return sum(weight for _, _, ok, weight in items if ok), items
 
 
@@ -373,18 +464,20 @@ async def handle_command(post: dict, approvers: set[str]) -> bool:
     if len(digits) != 20 or not consulta.cnj_check_digits_ok(digits):
         await send_message("Número CNJ inválido. Use o formato 0000000-00.0000.0.00.0000.", chat_id=chat_id, reply_to=reply_to)
         return True
-    if not consulta.alias_from_cnj(digits):
+    if settings.enable_datajud and not consulta.alias_from_cnj(digits):
         await send_message("Esse tribunal não tem índice público no DataJud (ex.: STF).", chat_id=chat_id, reply_to=reply_to)
         return True
     # Aviso imediato: a API do CNJ costuma levar de 10 s a 1 min.
     await send_message(f"🔎 Consultando {consulta.format_cnj(digits)} no CNJ… pode levar até 1 minuto.",
                        chat_id=chat_id, reply_to=reply_to)
-    try:
-        process = await consulta.datajud_lookup(digits)
-    except (consulta.ConsultaIndisponivel, DataJudError):
-        await send_message("A API do CNJ (DataJud) está sobrecarregada agora; tente novamente em alguns minutos. "
-                           "Isso não significa que o processo não existe.", chat_id=chat_id, reply_to=reply_to)
-        return True
+    process = None
+    if settings.enable_datajud:  # desligado (ENABLE_DATAJUD=false): só DJEN e histórico do bot
+        try:
+            process = await consulta.datajud_lookup(digits)
+        except (consulta.ConsultaIndisponivel, DataJudError):
+            await send_message("A API do CNJ (DataJud) está sobrecarregada agora; tente novamente em alguns minutos. "
+                               "Isso não significa que o processo não existe.", chat_id=chat_id, reply_to=reply_to)
+            return True
     djen = None
     max_amount = None
     try:
@@ -401,11 +494,12 @@ async def handle_command(post: dict, approvers: set[str]) -> bool:
         internal = {"documents": insight.get("documents", 0)}
         if opp:
             opp = dict(opp)
-            opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+            opp["datajud_signal"] = datajud_signal(opp.get("cnj_number"))
             internal.update(nota=nota_aspin(opp)[0], decision=opp.get("decision"))
     except Exception:
         internal = None
-    await send_message(consulta.summarize(digits, process, djen, internal, max_amount), html=True,
+    await send_message(consulta.summarize(digits, process, djen, internal, max_amount,
+                                          datajud_enabled=settings.enable_datajud), html=True,
                        chat_id=chat_id, reply_to=reply_to)
     return True
 
@@ -504,7 +598,7 @@ async def sync_sheet(metrics: dict) -> None:
             metrics["sheet_format_pending"] = str(exc)
     for opp in storage.sheet_outbox(50):
         try:
-            opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+            opp["datajud_signal"] = datajud_signal(opp.get("cnj_number"))
         except Exception:
             opp["datajud_signal"] = None
         try:
@@ -579,7 +673,7 @@ async def maybe_send_status(metrics: dict, errors: list[str]):
 async def _collect_datajud(metrics: dict, errors: list[str]):
     """Sinais de expedição de precatório/RPV no DataJud, com cursor por tribunal."""
     if not settings.enable_datajud:
-        metrics["datajud_disabled"] = True
+        metrics["datajud_disabled"] = True  # ENABLE_DATAJUD=false: nenhuma chamada ao DataJud
         return
     aliases = [canonical_alias(x) for x in settings.datajud_tribunals.split(",") if x.strip()]
     # Rodízio: cada ciclo começa num tribunal diferente, para o orçamento de tempo
@@ -776,9 +870,11 @@ async def _deliver_digest(metrics: dict, errors: list[str], now: datetime | None
         # Avalia uma amostra ampla (já ordenada por valor × confiança no banco) e
         # reordena com os campos do ofício: natureza, preferência, cessão.
         pool = storage.pending_alerts(settings.digest_pool_size)
+        if not settings.enable_datajud:
+            metrics["datajud_signal_disabled"] = True
         for opp in pool:
             try:
-                opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+                opp["datajud_signal"] = datajud_signal(opp.get("cnj_number"))
             except Exception:
                 opp["datajud_signal"] = None
         best = sorted(pool, key=rank_score, reverse=True)[:remaining]
@@ -813,7 +909,7 @@ async def _send_pending_alerts(metrics: dict, errors: list[str], opportunities: 
                 raise RuntimeError("Telegram: falha simulada")
             if "datajud_signal" not in opp:
                 try:
-                    opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+                    opp["datajud_signal"] = datajud_signal(opp.get("cnj_number"))
                 except Exception:
                     opp["datajud_signal"] = None
             total = settings.digest_top_n if slot else None
@@ -992,7 +1088,7 @@ async def send_preview() -> int:
     try:
         pool = storage.pending_alerts(settings.digest_pool_size)
         for opp in pool:
-            opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+            opp["datajud_signal"] = datajud_signal(opp.get("cnj_number"))
         best = sorted(pool, key=rank_score, reverse=True)[:settings.digest_top_n]
     except Exception as exc:
         log.warning("Prévia sem dados do banco: %s", storage.safe_error(exc))
@@ -1102,6 +1198,328 @@ async def _deliver_digest_now(totals: dict) -> None:
         raise RuntimeError("; ".join(errors)[:200])
 
 
+# ---------------------------------------------------------------------------
+# CRM: follow-up diário, resumo semanal e radar do DJEN nos processos em negociação.
+# Os dados vêm da planilha (ação crm_export, script v7+). Mensagens sem emojis.
+
+CRM_STAGES = ("Nova", "Em análise", "Contato feito", "Em negociação", "Proposta enviada",
+              "Documentação", "Ganho", "Perdido")
+CRM_CLOSED = ("ganho", "perdido")
+CRM_CHECK_SECONDS = 600  # no robô, confere no máximo a cada 10 min se algum alerta do CRM venceu
+CRM_LAST_CHECK = [float("-inf")]
+CRM_MESSAGE_LIMIT = 3800  # margem para o rodapé dentro dos 4096 do Telegram
+RADAR_SEEN_LIMIT = 300  # IDs de comunicação guardados por processo
+RADAR_HIGHLIGHTS = (
+    ("cessão", re.compile(r"\bcess(ao|oes|ionari)|credito cedido|\bcedent")),
+    ("penhora", re.compile(r"\bpenhor")),
+    # "requisição/ordem de pagamento" aparece em toda requisição; não é destaque.
+    ("pagamento/levantamento", re.compile(r"levantamento|\balvara|(?<!requisicao de )(?<!ordem de )\bpagamento")),
+    ("habilitação", re.compile(r"\bhabilita")),
+    ("cancelamento", re.compile(r"\bcancela")),
+)
+
+
+def crm_is_open(row: dict) -> bool:
+    return _plain(row.get("etapa")).strip() not in CRM_CLOSED
+
+
+def short_name(name) -> str:
+    """Primeiro nome + inicial do sobrenome (privacidade): 'MARIA DA SILVA' -> 'Maria S.'."""
+    # Ignora o que vem depois do nome ("- CPF ...", "(espólio)", números).
+    words = re.findall(r"[^\W\d_]+", re.split(r"\s[-–(/]|\d", str(name or ""))[0])
+    if not words:
+        return "Credor n/i"
+    first = words[0].capitalize()
+    return first if len(words) == 1 else f"{first} {words[-1][0].upper()}."
+
+
+def _crm_date(value) -> date | None:
+    try:
+        return date.fromisoformat(str(value or "").strip()[:10])
+    except ValueError:
+        return None
+
+
+def _crm_stamp(value, tz) -> datetime | None:
+    """'dd/MM/yyyy HH:mm' (etapaAtualizadaEm) no fuso local."""
+    text = str(value or "").strip()
+    for fmt in ("%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=tz)
+        except ValueError:
+            continue
+    return None
+
+
+def _crm_number(value) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return parse_amount(value)
+
+
+def _crm_link(app_url) -> str:
+    url = str(app_url or "").strip()
+    return f'<a href="{_html.escape(url, quote=True)}">Abrir o CRM</a>' if url.startswith("http") else ""
+
+
+def _crm_item(row: dict, tag: str) -> str:
+    valor = _crm_number(row.get("valor"))
+    when = _crm_date(row.get("dataProximaAcao"))
+    parts = [short_name(row.get("credor")), brl(valor) if valor is not None else "valor n/i",
+             str(row.get("etapa") or "Nova").strip(), str(row.get("proximaAcao") or "").strip() or "(sem descrição)"]
+    if when:
+        parts.append(f"{when:%d/%m}")
+    return "• " + _html.escape(f"[{tag}] " + " — ".join(parts))
+
+
+def _fit(lines: list[str], footer: list[str]) -> str:
+    """Corta a lista para caber no Telegram, avisando quantas linhas ficaram de fora."""
+    kept, size = [], sum(len(x) + 1 for x in footer)
+    for index, line in enumerate(lines):
+        if size + len(line) + 1 > CRM_MESSAGE_LIMIT:
+            kept.append(f"… e mais {len(lines) - index} linha(s); veja no CRM.")
+            break
+        kept.append(line)
+        size += len(line) + 1
+    return "\n".join(kept + footer)
+
+
+def followup_message(rows: list[dict], today: date, app_url: str = "") -> str:
+    """Follow-up do dia: atrasadas e para hoje por responsável, e abertas sem próxima ação."""
+    e = _html.escape
+    groups: dict[str, dict[str, list]] = {}
+    without = []
+    for row in rows:
+        if not crm_is_open(row):
+            continue
+        when = _crm_date(row.get("dataProximaAcao"))
+        who = str(row.get("responsavel") or "").strip() or "Sem responsável"
+        if when and when < today:
+            groups.setdefault(who, {"late": [], "today": []})["late"].append(row)
+        elif when == today:
+            groups.setdefault(who, {"late": [], "today": []})["today"].append(row)
+        elif not when and not str(row.get("proximaAcao") or "").strip():
+            without.append(row)
+    late = sum(len(g["late"]) for g in groups.values())
+    due = sum(len(g["today"]) for g in groups.values())
+    link = _crm_link(app_url)
+    footer = ["", link] if link else []
+    header = f"<b>ASPIN | Follow-up do CRM — {today:%d/%m/%Y}</b>"
+    if not groups and not without:
+        return "\n".join([header, "", "Tudo em dia: nenhuma ação atrasada ou para hoje."] + footer)
+    lines = [header, "", f"Atrasadas: {late} — Para hoje: {due} — Sem próxima ação: {len(without)}"]
+    if not groups:
+        lines += ["", "Nenhuma ação atrasada ou para hoje."]
+    for who in sorted(groups, key=lambda w: (w == "Sem responsável", w.casefold())):
+        lines += ["", f"<b>{e(who)}</b>"]
+        lines += [_crm_item(r, "ATRASADA") for r in sorted(groups[who]["late"], key=lambda r: str(r.get("dataProximaAcao")))]
+        lines += [_crm_item(r, "HOJE") for r in groups[who]["today"]]
+    if without:
+        names = ", ".join(short_name(r.get("credor")) for r in without[:5]) + (", …" if len(without) > 5 else "")
+        lines += ["", e(f"Abertas sem próxima ação: {len(without)} ({names})")]
+    return _fit(lines, footer)
+
+
+def weekly_message(rows: list[dict], stages, now_local: datetime, app_url: str = "") -> str:
+    """Resumo de segunda: funil, comissão potencial em aberto, ganhos/perdas da semana e atrasos."""
+    e = _html.escape
+    names = [str(s) for s in (stages or CRM_STAGES) if str(s).strip()]
+    funnel = {name: [0, 0.0] for name in names}
+    lookup = {_plain(name).strip(): name for name in names}
+    week_start = now_local - timedelta(days=7)
+    commission = 0.0
+    results = {"ganho": [0, 0.0], "perdido": [0, 0.0]}
+    late = 0
+    for row in rows:
+        stage = str(row.get("etapa") or "").strip() or "Nova"
+        name = lookup.setdefault(_plain(stage), stage)
+        funnel.setdefault(name, [0, 0.0])
+        valor = _crm_number(row.get("valor")) or 0.0
+        funnel[name][0] += 1
+        funnel[name][1] += valor
+        if crm_is_open(row):
+            fee = _crm_number(row.get("comissao"))
+            commission += fee if fee is not None else valor * settings.aspin_commission_rate
+            when = _crm_date(row.get("dataProximaAcao"))
+            late += bool(when and when < now_local.date())
+            continue
+        stamp = _crm_stamp(row.get("etapaAtualizadaEm"), now_local.tzinfo)
+        if stamp and week_start <= stamp <= now_local:
+            outcome = results[_plain(stage).strip()]
+            outcome[0] += 1
+            outcome[1] += valor
+    lines = [f"<b>ASPIN | Resumo semanal do CRM — {week_start:%d/%m} a {now_local:%d/%m/%Y}</b>", "", "<b>Funil</b>"]
+    lines += [e(f"• {name} — {count} — {brl(total)}") for name, (count, total) in funnel.items()]
+    lines += ["",
+              e(f"Comissão potencial em aberto: {brl(commission)}"),
+              e(f"Ganhos na semana: {results['ganho'][0]} ({brl(results['ganho'][1])})"),
+              e(f"Perdas na semana: {results['perdido'][0]} ({brl(results['perdido'][1])})"),
+              e(f"Ações atrasadas: {late}")]
+    link = _crm_link(app_url)
+    return _fit(lines, ["", link] if link else [])
+
+
+def radar_highlights(text) -> list[str]:
+    plain = _plain(clean_text(text))
+    return [label for label, pattern in RADAR_HIGHLIGHTS if pattern.search(plain)]
+
+
+def _djen_date(item: dict) -> str:
+    return str(item.get("data_disponibilizacao") or item.get("dataDisponibilizacao") or "")[:10]
+
+
+def radar_message(row: dict, item: dict) -> str:
+    """Aviso de comunicação nova no DJEN para um processo em negociação."""
+    e = _html.escape
+    digits = re.sub(r"\D", "", str(row.get("processo") or ""))
+    link = str(row.get("linkProcesso") or "").strip() or process_url(digits)
+    text = clean_text(item.get("texto") or "")
+    excerpt = text[:300] + ("…" if len(text) > 300 else "")
+    when = _crm_date(_djen_date(item))
+    kind = str(item.get("tipoComunicacao") or item.get("tipoDocumento") or "Comunicação").strip()
+    tribunal = str(item.get("siglaTribunal") or row.get("tribunal") or "").strip()
+    cnj = consulta.format_cnj(digits)
+    process = f'<a href="{e(link, quote=True)}">{e(cnj)}</a>' if link.startswith("http") else e(cnj)
+    lines = ["<b>ASPIN | Radar do CRM — nova comunicação no DJEN</b>"]
+    marks = radar_highlights(text)
+    if marks:
+        lines.append(f"<b>[DESTAQUE] menciona {e(', '.join(marks))}</b>")
+    lines += [
+        f"Credor: {e(short_name(row.get('credor')))}",
+        f"Processo: {process}",
+        e(f"Etapa: {str(row.get('etapa') or 'Nova').strip()} — Responsável: {str(row.get('responsavel') or '').strip() or 'sem responsável'}"),
+        e(f"Comunicação: {kind} — {when:%d/%m/%Y}" if when else f"Comunicação: {kind}") + (f" ({e(tribunal)})" if tribunal else ""),
+        f"Trecho: {e(excerpt)}" if excerpt else "Trecho: (sem texto)",
+    ]
+    return "\n".join(lines)[:4000]
+
+
+def radar_due(now: datetime) -> bool:
+    last = storage.get_state("radar_crm").get("last_run")
+    try:
+        return (now - datetime.fromisoformat(last)).total_seconds() >= settings.radar_interval_hours * 3600
+    except (TypeError, ValueError):
+        return True
+
+
+async def radar_pass(rows: list[dict], now: datetime) -> dict:
+    """Consulta o DJEN pelos processos com etapa aberta e avisa as comunicações novas.
+
+    Primeira passada de cada processo só registra o que já existe (sem avalanche).
+    No máximo RADAR_MAX_ALERTS avisos por passada; o que sobrar fica para a próxima.
+    """
+    metrics = {"radar_processos": 0, "radar_registrados": 0, "radar_novas": 0, "radar_alertas": 0, "radar_falhas": 0}
+    known = dict(storage.get_state("radar_crm").get("processes") or {})
+    open_rows: dict[str, dict] = {}
+    for row in rows:
+        digits = re.sub(r"\D", "", str(row.get("processo") or ""))
+        if crm_is_open(row) and len(digits) == 20:
+            open_rows.setdefault(digits, row)
+    # Quem foi consultado há mais tempo vai primeiro (o teto de requests pode cortar a passada).
+    order = sorted(open_rows, key=lambda d: str((known.get(d) or {}).get("checked", "")))
+    until = now.astimezone(ZoneInfo(settings.digest_timezone)).date()
+    since = until - timedelta(days=settings.radar_lookback_days)
+    request_count = [0]
+    stop = False
+    try:
+        for digits in order:
+            found = await search_djen_process(digits, since, until, request_count=request_count)
+            if found.blocked:
+                metrics["radar_interrompido"] = (found.errors or ["limite de requests"])[0][:160]
+                break
+            if not found.ok:
+                metrics["radar_falhas"] += 1
+                continue
+            metrics["radar_processos"] += 1
+            entry = known.get(digits)
+            if entry is None:
+                known[digits] = {"seen": [djen_row_id(r) for r in found.rows][-RADAR_SEEN_LIMIT:], "checked": now.isoformat()}
+                metrics["radar_registrados"] += 1
+                continue
+            seen = list(entry.get("seen") or [])
+            new = sorted((r for r in found.rows if djen_row_id(r) not in set(seen)), key=_djen_date)
+            metrics["radar_novas"] += len(new)
+            for item in new:
+                if metrics["radar_alertas"] >= settings.radar_max_alerts:
+                    metrics["radar_limitado"] = True
+                    stop = True
+                    break
+                try:
+                    await send_message(radar_message(open_rows[digits], item), html=True)
+                except Exception as exc:
+                    metrics["radar_error"] = str(exc) if str(exc).startswith("Telegram") else storage.safe_error(exc)
+                    stop = True
+                    break
+                seen.append(djen_row_id(item))
+                metrics["radar_alertas"] += 1
+            known[digits] = {"seen": seen[-RADAR_SEEN_LIMIT:], "checked": now.isoformat()}
+            if stop:
+                break
+    finally:
+        # Processo que fechou (Ganho/Perdido) ou saiu do CRM deixa de ser acompanhado.
+        known = {d: v for d, v in known.items() if d in open_rows}
+        storage.set_state("radar_crm", {"last_run": now.isoformat(), "processes": known})
+    return metrics
+
+
+async def crm_jobs(now: datetime | None = None) -> dict:
+    """Alertas do CRM que venceram: follow-up diário, resumo semanal (segunda) e radar.
+
+    Cada envio marca o dia em storage, então reinício do robô não repete mensagem.
+    Script da planilha sem crm_export (versão < 7): pula em silêncio, só registra.
+    """
+    metrics: dict = {}
+    now = now or datetime.now(timezone.utc)
+    local = now.astimezone(ZoneInfo(settings.digest_timezone))
+    today = local.date().isoformat()
+    after_hour = local.hour >= settings.crm_alert_hour
+    daily = after_hour and storage.get_state("crm_followup").get("day") != today
+    weekly = after_hour and local.weekday() == 0 and storage.get_state("crm_weekly").get("day") != today
+    radar = settings.enable_djen and radar_due(now)
+    if not settings.enable_djen:
+        metrics["radar"] = "djen_desativado"  # a API do DJEN recusa IPs fora do Brasil
+    if not (daily or weekly or radar):
+        return metrics
+    try:
+        export = await sheets.crm_export()
+    except sheets.SheetsError as exc:
+        metrics["crm_error"] = str(exc)
+        return metrics
+    if export is None:
+        metrics["crm"] = "sem_crm_export"  # planilha não configurada ou script anterior à v7
+        return metrics
+    rows, app_url = export["rows"], str(export.get("appUrl") or "")
+    jobs = []
+    if daily:
+        jobs.append(("crm_followup", lambda: followup_message(rows, local.date(), app_url)))
+    if weekly:
+        jobs.append(("crm_weekly", lambda: weekly_message(rows, export.get("stages"), local, app_url)))
+    for key, build in jobs:
+        try:
+            await send_message(build(), html=True)
+            storage.set_state(key, {"day": today, "at": now.isoformat()})
+            metrics[key] = "enviado"
+        except Exception as exc:
+            metrics[key] = "erro: " + (str(exc) if str(exc).startswith("Telegram") else storage.safe_error(exc))
+    if radar:
+        metrics.update(await radar_pass(rows, now))
+    return metrics
+
+
+async def _crm_jobs_now(totals: dict) -> None:
+    """No robô: confere os alertas do CRM no máximo a cada CRM_CHECK_SECONDS."""
+    if time.monotonic() - CRM_LAST_CHECK[0] < CRM_CHECK_SECONDS:
+        return
+    CRM_LAST_CHECK[0] = time.monotonic()
+    report = await crm_jobs()
+    if any(k != "radar" for k in report):
+        totals["crm"] = report
+        log.info("Robô: CRM: %s", json.dumps(report, ensure_ascii=False))
+
+
 async def _daemon_cycle(reason: str) -> dict | None:
     log.info("Robô: iniciando coleta (%s)", reason)
     try:
@@ -1149,6 +1567,11 @@ async def run_daemon(max_minutes: float) -> dict:
             except Exception as exc:
                 totals["errors"] += 1
                 log.warning("Robô: entrega adiada: %s", storage.safe_error(exc))
+            try:
+                await _crm_jobs_now(totals)
+            except Exception as exc:
+                totals["errors"] += 1
+                log.warning("Robô: alertas do CRM adiados: %s", storage.safe_error(exc))
         if cycle is None and not yielding and now < deadline - settings.cycle_timeout_seconds:
             try:
                 reason = collector_dispatch_reason()

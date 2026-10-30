@@ -22,6 +22,15 @@ Estudo das plataformas pagas: [docs/ESTUDO_CONCORRENTES.md](docs/ESTUDO_CONCORRE
 
 Copie `.env.example` para `.env` e preencha os segredos. Nunca commite `.env`.
 
+**DataJud e uso comercial:** o termo de uso da API pública do DataJud (CNJ) proíbe uso comercial.
+`ENABLE_DATAJUD=false` (variável do repositório no GitHub) desliga toda chamada ao DataJud: coleta, sinal de expedição e `/processo`.
+O padrão continua `true` até a decisão jurídica; desligado, o critério "Expedição confirmada no DataJud" da Nota ASPIN nunca pontua.
+
+**Alertas do CRM** (exigem o script da planilha v7, com a ação `crm_export`; antes disso o robô só pula):
+follow-up diário às `CRM_ALERT_HOUR` (padrão 8h, Brasília) com ações atrasadas e de hoje por responsável,
+resumo semanal na segunda e radar do DJEN nos processos com etapa aberta a cada `RADAR_INTERVAL_HOURS` (6 h),
+com no máximo `RADAR_MAX_ALERTS` (15) avisos por passada. O radar só roda com `ENABLE_DJEN=true` (DJEN exige IP do Brasil).
+
 ```bash
 cp .env.example .env
 python3 -m venv .venv
