@@ -742,6 +742,11 @@ function crmDelete(id, por, motivo) {
       lixo.setFrozenRows(1);
       lixo.getRange(1, cab.length + 2).setValue('Para recuperar: copie a linha (sem as 3 primeiras colunas) de volta para o fim da aba Aprovadas.')
         .setFontColor('#666666').setFontStyle('italic');
+      const pr = lixo.protect().setDescription(PROTECAO);  // já nasce protegida (só o dono altera)
+      pr.removeEditors(pr.getEditors());
+      if (pr.canDomainEdit()) {
+        pr.setDomainEdit(false);
+      }
     }
     const linha = sheet.getRange(row, 1, 1, lastCol);
     const valores = linha.getDisplayValues()[0];
