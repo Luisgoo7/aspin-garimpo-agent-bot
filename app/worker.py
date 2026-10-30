@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+import unicodedata
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -105,15 +106,85 @@ def brl(amount) -> str:
     return f"R$ {float(amount):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-# Nota ASPIN: critérios objetivos e verificáveis, somando 10 pontos.
+# Nota ASPIN 2.0: critérios objetivos e verificáveis, somando 10 pontos.
+# Pesos (a versão 1 dava 6 ou 7 a quase tudo, porque valor e expedição quase sempre pontuavam):
+#   valor_alto  1  valor citado >= R$ 500 mil (todo candidato já passa do ticket mínimo)
+#   expedido    1  requisição expedida/ordenada (precatório, RPV, ofício)
+#   datajud     1  expedição confirmada no DataJud (nunca pontua com ENABLE_DATAJUD=false)
+#   sem_cessao  2  sem FIDC/banco/cessionário citado (crédito possivelmente já cedido)
+#   devedor     2  qualidade do devedor: federal (União, INSS, autarquias, TRF) = 2;
+#                  estado, DF ou capital = 1; demais municípios ou não identificado = 0
+#   preferencia 1  superpreferência/preferência legal (idoso, doença grave, deficiência)
+#   alimentar   1  natureza alimentar
+#   recente     1  publicação de até 7 dias (menos concorrência)
 NOTA_CRITERIA = (
-    ("valor", "Valor citado no texto", 2),
-    ("expedido", "Requisição expedida/ordenada", 2),
-    ("datajud", "Expedição confirmada no DataJud", 2),
+    ("valor_alto", "Valor a partir de R$ 500 mil", 1),
+    ("expedido", "Requisição expedida/ordenada", 1),
+    ("datajud", "Expedição confirmada no DataJud", 1),
     ("sem_cessao", "Sem FIDC/banco/cessionário citado", 2),
+    ("devedor", "Devedor federal (União/INSS/autarquia/TRF)", 2),
+    ("preferencia", "Preferência legal (idoso, doença grave, deficiência)", 1),
     ("alimentar", "Natureza alimentar", 1),
     ("recente", "Publicação recente (até 7 dias)", 1),
 )
+NOTA_HIGH_AMOUNT = 500_000
+DEVEDOR_LABELS = {"federal": ("Devedor federal (União/INSS/autarquia/TRF)", 2),
+                  "estadual": ("Devedor estadual, DF ou capital", 1)}
+
+
+def _plain(text) -> str:
+    """Minúsculas sem acento, para as heurísticas de texto."""
+    decomposed = unicodedata.normalize("NFKD", str(text or ""))
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).casefold()
+
+
+_CAPITAIS = ("rio branco", "maceio", "macapa", "manaus", "salvador", "fortaleza", "vitoria", "goiania",
+             "sao luis", "cuiaba", "campo grande", "belo horizonte", "belem", "joao pessoa", "curitiba",
+             "recife", "teresina", "rio de janeiro", "natal", "porto alegre", "porto velho", "boa vista",
+             "florianopolis", "sao paulo", "aracaju", "palmas")
+_FEDERAL_RE = re.compile(
+    r"\buniao\b|fazenda nacional|\binss\b|instituto nacional do seguro social|autarquia federal"
+    r"|fundacao (nacional|federal)|universidade federal|instituto federal|\b(ibama|incra|funai|funasa|dnit|dnocs"
+    r"|anatel|anvisa|aneel|antt|anac|cnen|ibge|inmetro|cade|bacen)\b|banco central do brasil"
+    r"|agencia nacional|departamento nacional|conselho federal")
+_ESTADUAL_RE = re.compile(
+    r"\bestado (de|do|da|dos)\b|fazenda (publica )?(do |da )?estad|governo do estado|distrito federal"
+    r"|\b(spprev|ipesp|iamspe|detran|der|daee|rioprevidencia|igeprev|ipsemg)\b|\bestadual\b")
+_MUNICIPAL_RE = re.compile(r"\bmunicipi|prefeitura|\bmunicipal\b|camara de vereadores")
+_CAPITAL_RE = re.compile(r"\b(municipio|prefeitura)( municipal)?( de| do| da)? (" + "|".join(_CAPITAIS)
+                         + r")\b(?! d[aeo]s? )")
+
+
+def debtor_sphere(debtor, alias=None) -> str | None:
+    """Esfera do devedor pelo nome (e pelo tribunal): federal, estadual (inclui DF e capitais),
+    municipal ou None (não identificado)."""
+    name = _plain(debtor)
+    if name:
+        if _FEDERAL_RE.search(name):
+            return "federal"
+        if _MUNICIPAL_RE.search(name):
+            return "estadual" if _CAPITAL_RE.search(name) else "municipal"
+        if _ESTADUAL_RE.search(name):
+            return "estadual"
+    # Precatório/RPV expedido por TRF tem devedor federal.
+    if str(alias or "").casefold().removeprefix("api_publica_").startswith("trf"):
+        return "federal"
+    return None
+
+
+_PREFERENCIA_RE = re.compile(r"idos|60 anos|80 anos|doenc|molestia|grave|deficien|\bpcd\b|superpref|preferen")
+_SEM_PREFERENCIA_RE = re.compile(r"^\s*(nao|sem|nenhum|inexist|n/?a\b|-)")
+_SUPERPREF_TEXT_RE = re.compile(r"superpreferen|doenca grave|portador(a)? de (doenca|deficiencia)"
+                                r"|pessoa com deficiencia|molestia grave")
+
+
+def has_legal_preference(opp: dict) -> bool:
+    """Preferência legal declarada pela IA ou superpreferência citada na publicação."""
+    result = opp.get("classification") or {}
+    declared = _plain(result.get("legal_preference"))
+    if declared and not _SEM_PREFERENCIA_RE.search(declared) and _PREFERENCIA_RE.search(declared):
+        return True
+    return bool(_SUPERPREF_TEXT_RE.search(_plain(opp.get("text_excerpt"))))
 
 
 def _published_recently(result: dict, opp: dict, days: int) -> bool:
@@ -134,18 +205,27 @@ def nota_aspin(opp: dict) -> tuple[int, list[tuple[str, str, bool, int]]]:
     """(pontos de 0 a 10, [(chave, descrição, atendido, peso)]).
 
     Diferente da confiança da IA (opinião do modelo), cada ponto aqui é um fato
-    conferível na publicação ou no DataJud.
+    conferível na publicação ou no DataJud. No critério do devedor (gradual), o peso
+    do item é o que ele rendeu e a descrição diz a esfera encontrada.
     """
     result = opp.get("classification") or {}
+    amount = float(opp.get("amount") or 0) if opp.get("amount") is not None else 0.0
+    sphere = debtor_sphere(opp.get("debtor_entity"), opp.get("alias"))
     checks = {
-        "valor": opp.get("amount") is not None and float(opp.get("amount") or 0) > 0,
+        "valor_alto": amount >= NOTA_HIGH_AMOUNT,
         "expedido": opp.get("requisition_type") in ("oficio_requisitorio", "precatorio", "rpv"),
         "datajud": bool(opp.get("datajud_signal")),
         "sem_cessao": not result.get("third_party_interest"),
+        "devedor": sphere in DEVEDOR_LABELS,
+        "preferencia": has_legal_preference(opp),
         "alimentar": result.get("credit_nature") == "alimentar",
         "recente": _published_recently(result, opp, days=7),
     }
-    items = [(key, label, checks[key], weight) for key, label, weight in NOTA_CRITERIA]
+    items = []
+    for key, label, weight in NOTA_CRITERIA:
+        if key == "devedor" and sphere in DEVEDOR_LABELS:
+            label, weight = DEVEDOR_LABELS[sphere]
+        items.append((key, label, checks[key], weight))
     return sum(weight for _, _, ok, weight in items if ok), items
 
 

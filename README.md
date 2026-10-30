@@ -24,7 +24,7 @@ Copie `.env.example` para `.env` e preencha os segredos. Nunca commite `.env`.
 
 **DataJud e uso comercial:** o termo de uso da API pública do DataJud (CNJ) proíbe uso comercial.
 `ENABLE_DATAJUD=false` (variável do repositório no GitHub) desliga toda chamada ao DataJud: coleta, sinal de expedição e `/processo`.
-O padrão continua `true` até a decisão jurídica; desligado, o critério "Confirmado no DataJud" da Nota ASPIN nunca pontua.
+O padrão continua `true` até a decisão jurídica; desligado, o critério "Expedição confirmada no DataJud" da Nota ASPIN nunca pontua.
 
 ```bash
 cp .env.example .env
