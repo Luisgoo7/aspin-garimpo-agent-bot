@@ -439,12 +439,12 @@ const AUX = {
     'Valor mínimo (R$)', 'Valor máximo (R$)', 'Deságio mínimo (%)', 'Tribunais', 'Ativo', 'Observações', 'Atualizado em']],
   contacts: ['Contatos', ['ID interno', 'Credor', 'Data', 'Canal', 'Resultado', 'Resumo', 'Por', 'Não quer contato']],
   proposals: ['Propostas', ['ID interno', 'Credor', 'Data', 'Valor de face (R$)', 'Pagamento previsto', 'Correção (% a.a.)',
-    'Taxa do comprador (% a.a.)', 'Comissão ÂSPIN (%)', 'Preço ao comprador (R$)', 'Oferta ao credor (R$)', 'Deságio (%)', 'Por']]
+    'Taxa do comprador (% a.a.)', 'Comissão ASPIN (%)', 'Preço ao comprador (R$)', 'Oferta ao credor (R$)', 'Deságio (%)', 'Por']]
 };
 
 function crmPage_() {
   return HtmlService.createHtmlOutputFromFile('crm')
-    .setTitle('ÂSPIN · CRM de Oportunidades')
+    .setTitle('ASPIN · CRM de Oportunidades')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
@@ -465,6 +465,8 @@ function aux_(key) {
     sh.setFrozenRows(1);
     sh.setColumnWidths(1, headers.length, 160);
     sh.getRange(2, 1, 999, headers.length).setNumberFormat('@');
+  } else if (sh.getRange(1, 1, 1, headers.length).getValues()[0].join('|') !== headers.join('|')) {
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);  // cabeçalho renomeado no código
   }
   return sh;
 }
@@ -663,7 +665,7 @@ function crmSaveProposal(id, credor, p) {
   try {
     const obj = { 'ID interno': id, 'Credor': credor, 'Data': agora_(), 'Valor de face (R$)': p.face,
       'Pagamento previsto': p.pagamento, 'Correção (% a.a.)': p.correcao, 'Taxa do comprador (% a.a.)': p.taxa,
-      'Comissão ÂSPIN (%)': p.comissao, 'Preço ao comprador (R$)': p.preco, 'Oferta ao credor (R$)': p.oferta,
+      'Comissão ASPIN (%)': p.comissao, 'Preço ao comprador (R$)': p.preco, 'Oferta ao credor (R$)': p.oferta,
       'Deságio (%)': p.desagio, 'Por': p.por };
     auxAppend_('proposals', obj);
     const row = crmSaveUnlocked_(id, { 'Valor proposto (R$)': Number(p.oferta) });
