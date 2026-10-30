@@ -12,7 +12,7 @@ def configured() -> bool:
     return bool(settings.sheets_webhook_url.strip() and settings.sheets_token.strip())
 
 
-LAYOUT_VERSION = 4  # v4: nº do Processo vira link para a consulta pública do CNJ
+LAYOUT_VERSION = 5  # v5: colunas do CRM (Etapa, Responsável, Próxima ação...) e abas Listas/Funil
 
 
 async def script_version() -> int:
