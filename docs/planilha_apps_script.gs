@@ -675,6 +675,45 @@ function crmSaveProposal(id, credor, p) {
   }
 }
 
+/** Exclui uma oportunidade da aba Aprovadas, guardando a linha inteira na aba "Excluídas" (dá para recuperar). */
+function crmDelete(id, por, motivo) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = sheet_();
+    const lastCol = sheet.getLastColumn();
+    const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+    const row = rowOf_(sheet, header, id);
+    let lixo = ss.getSheetByName('Excluídas');
+    const cab = ['Excluída em', 'Excluída por', 'Motivo da exclusão'].concat(header);
+    if (!lixo) {
+      lixo = ss.insertSheet('Excluídas', ss.getNumSheets());
+      lixo.getRange(1, 1, 1, cab.length).setValues([cab]).setBackground('#8E1B1B').setFontColor('#FFFFFF').setFontWeight('bold');
+      lixo.setFrozenRows(1);
+      lixo.getRange(1, cab.length + 2).setValue('Para recuperar: copie a linha (sem as 3 primeiras colunas) de volta para o fim da aba Aprovadas.')
+        .setFontColor('#666666').setFontStyle('italic');
+    }
+    const linha = sheet.getRange(row, 1, 1, lastCol);
+    const valores = linha.getDisplayValues()[0];
+    const rich = linha.getRichTextValues()[0];
+    // Guarda os links (Processo e Fonte) como texto, para não se perderem.
+    header.forEach(function (h, j) {
+      if ((h === 'Processo' || h === 'Fonte') && rich[j] && rich[j].getLinkUrl()) {
+        valores[j] = h === 'Fonte' ? rich[j].getLinkUrl() : valores[j] + ' (' + rich[j].getLinkUrl() + ')';
+      }
+    });
+    const destino = lixo.getLastRow() + 1;
+    lixo.getRange(destino, 1, 1, cab.length).setNumberFormat('@')
+      .setValues([[agora_(), String(por || ''), String(motivo || '').slice(0, 300)].concat(valores)]);
+    sheet.deleteRow(row);
+    SpreadsheetApp.flush();
+    return { ok: true, id: id };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 /** Para o robô (alertas e radar): oportunidades em formato enxuto. */
 function crmExport_() {
   const d = crmData();

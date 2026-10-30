@@ -83,7 +83,12 @@
   .cartao { background: var(--papel); border: 1px solid var(--linha); border-radius: 12px; padding: 12px; cursor: pointer; box-shadow: var(--sombra); border-left: 4px solid var(--cor, var(--ouro-medio)); transition: transform .08s, box-shadow .08s; }
   .cartao:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(22,36,63,.12); }
   .cartao.arrastando { opacity: .45; }
-  .cartao .credor { font-weight: 700; color: var(--marinho); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .cartao { position: relative; }
+  .cartao .apagar { position: absolute; top: 8px; right: 8px; width: 26px; height: 26px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: #B9B2A3; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; opacity: .0; transition: opacity .12s; }
+  .cartao:hover .apagar, .cartao .apagar:focus { opacity: 1; }
+  .cartao .apagar:hover { background: var(--vermelho-claro); color: var(--vermelho); border-color: #F2C4C0; }
+  @media (hover: none) { .cartao .apagar { opacity: 1; } }
+  .cartao .credor { padding-right: 26px; font-weight: 700; color: var(--marinho); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .cartao .valor { font-size: 18px; font-weight: 800; color: var(--ouro); margin: 4px 0 6px; }
   .chips { display: flex; flex-wrap: wrap; gap: 5px; }
   .chip { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px; background: #F1EEE7; color: var(--grafite); white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
@@ -279,6 +284,7 @@
   <symbol id="i-copiar" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
   <symbol id="i-ok" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></symbol>
   <symbol id="i-alvo" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></symbol>
+  <symbol id="i-lixo" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6"/></symbol>
   <symbol id="i-pasta" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2z"/></symbol>
 </svg>
 
@@ -367,6 +373,14 @@ Não há nenhum custo para você conhecer a proposta, e não pedimos nenhum paga
       </div>
     </div>
     <footer><button class="btn btn-marinho" onclick="fecharModal('roteiro')">Fechar</button></footer>
+  </div>
+</div>
+
+<div class="modal" id="modalExcluir" onclick="if (event.target === this) fecharModal('modalExcluir')">
+  <div class="caixa" style="max-width:520px">
+    <header style="background:#8E1B1B"><div><b style="color:#fff">EXCLUIR OPORTUNIDADE</b><span>Ela sai do CRM e vai para a aba "Excluídas" da planilha</span></div><button class="x" onclick="fecharModal('modalExcluir')" title="Fechar"><svg class="i"><use href="#i-fechar"/></svg></button></header>
+    <div class="corpo-m" id="corpoExcluir"></div>
+    <footer><button class="btn btn-linha" onclick="fecharModal('modalExcluir')">Cancelar</button><button class="btn btn-perigo" id="btnConfirmaExcluir" onclick="confirmarExclusao()"><svg class="i"><use href="#i-lixo"/></svg>Excluir</button></footer>
   </div>
 </div>
 
@@ -553,6 +567,7 @@ function kpis() {
 function cartao(o) {
   const c = cor(o.etapa), s = situacao(o), dd = progressoDD(o.id), bloqueado = optout(o.id);
   return '<div class="cartao" draggable="true" data-id="' + esc(o.id) + '" style="--cor:' + c.texto + '" onclick="abrir(this.dataset.id)">' +
+    '<button class="apagar" title="Excluir oportunidade" onclick="event.stopPropagation(); pedirExclusao(\'' + esc(o.id) + '\')">' + ic('lixo', 'p') + '</button>' +
     '<div class="credor">' + esc(o.credor) + '</div>' +
     '<div class="valor">' + brl.format(o.valor) + '</div>' +
     '<div class="chips"><span class="chip ' + notaClasse(o.nota) + '">' + ic('estrela', 'p') + (o.nota || '–') + '/10</span>' +
@@ -786,7 +801,7 @@ function abaNegociacao(o, c, r) {
     '<div class="campo" id="campoMotivo" style="display:none"><label for="f_motivo">Motivo da perda</label><select id="f_motivo">' + opcoes(d.reasons, o.motivo, 'escolha o motivo') + '</select></div>' +
     '<div class="campo"><label for="f_obs">Observações</label><textarea id="f_obs" maxlength="2000" placeholder="Anotações gerais da negociação…">' + esc(o.obs) + '</textarea></div>' +
     (o.etapaEm ? '<div style="font-size:12px;color:var(--suave)">' + ic('relogio', 'p') + ' Etapa atualizada em ' + esc(o.etapaEm) + '</div>' : '') + '</div>';
-  r.innerHTML = '<button class="btn btn-ouro" onclick="salvarGaveta()">' + ic('salvar') + 'Salvar na planilha</button><button class="btn btn-linha" onclick="fecharGaveta()">Fechar</button><span class="status">As mudanças só valem depois de salvar.</span>';
+  r.innerHTML = '<button class="btn btn-ouro" onclick="salvarGaveta()">' + ic('salvar') + 'Salvar na planilha</button><button class="btn btn-linha" onclick="fecharGaveta()">Fechar</button><button class="btn btn-perigo" style="margin-left:auto" onclick="pedirExclusao(ESTADO.aberto)">' + ic('lixo') + 'Excluir</button>';
   mostraMotivo();
 }
 
@@ -922,6 +937,25 @@ function salvarGaveta() {
   if (!Object.keys(mud).length) { toast('Nada mudou'); return; }
   salvar(o.id, mud);
 }
+function pedirExclusao(id) {
+  const o = acha(id); if (!o) return;
+  ESTADO.excluir = id;
+  $('#corpoExcluir').innerHTML = '<p style="margin:0 0 10px">Tem certeza que quer excluir <b>' + esc(o.credor) + '</b> (' + brl.format(o.valor) + ', ' + esc(o.tribunal) + ')?</p>' +
+    '<p class="sub" style="margin:0 0 14px">Use para oportunidades duplicadas, aprovadas por engano ou sem chance real. Se a negociação só não deu certo, prefira marcar a etapa <b>Perdido</b>: assim ela entra nas estatísticas. A linha excluída fica guardada na aba "Excluídas" e pode ser recuperada.</p>' +
+    '<div class="campo"><label for="x_motivo">Motivo da exclusão <span class="ajuda">— opcional</span></label><input id="x_motivo" maxlength="300" placeholder="Ex.: duplicada, aprovada por engano"></div>';
+  abrirModal('modalExcluir');
+  setTimeout(() => { const m = $('#x_motivo'); if (m) m.focus(); }, 50);
+}
+function confirmarExclusao() {
+  const id = ESTADO.excluir, o = acha(id); if (!o) return;
+  const b = $('#btnConfirmaExcluir'); b.disabled = true; toast('Excluindo…');
+  rodar('crmDelete', [id, ESTADO.eu || '', $('#x_motivo').value.trim()], () => {
+    b.disabled = false; fecharModal('modalExcluir');
+    ESTADO.dados.lista = ESTADO.dados.lista.filter((x) => x.id !== id);
+    if (ESTADO.aberto === id) fecharGaveta();
+    desenhar(); toast('Excluída. Ela ficou guardada na aba Excluídas.', false, true);
+  }, () => { b.disabled = false; });
+}
 function fecharGaveta() { ESTADO.aberto = null; $('#gaveta').classList.remove('aberta'); $('#gaveta').setAttribute('aria-hidden', 'true'); $('#veu').classList.remove('aberto'); }
 
 /* ---------------- Modais, avisos, eventos ---------------- */
@@ -941,7 +975,7 @@ $('#eu').addEventListener('change', (e) => { ESTADO.eu = e.target.value; guarda(
 $('#btnAtualizar').addEventListener('click', carregar);
 $('#btnAjuda').addEventListener('click', () => abrirModal('ajuda'));
 $('#btnRoteiro').addEventListener('click', () => abrirModal('roteiro'));
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { fecharGaveta(); ['ajuda', 'roteiro', 'modalComprador'].forEach(fecharModal); } });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { fecharGaveta(); ['ajuda', 'roteiro', 'modalComprador', 'modalExcluir'].forEach(fecharModal); } });
 
 (function inicio() {
   const v = guarda('crm_vista'); if (v && ['quadro', 'lista', 'agenda', 'funil', 'compradores', 'book'].indexOf(v) >= 0) { ESTADO.vista = v; marcarAba(); }
