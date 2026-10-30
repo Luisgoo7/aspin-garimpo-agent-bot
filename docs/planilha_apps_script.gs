@@ -11,8 +11,8 @@
  * (ou use o menu ASPIN > Formatar planilha, que aparece ao abrir a planilha).
  *
  * Web app do CRM (tela visual): crie também o arquivo HTML "crm" (Arquivo > + > HTML) com o
- * conteúdo de docs/crm.html e publique uma implantação separada como app da Web, executando como
- * "Usuário que acessa o app da Web". Abra a URL /exec com ?app=crm no final.
+ * conteúdo de docs/crm.html e publique uma implantação separada como app da Web, executando como "Eu" (dono)
+ * e acesso "Qualquer pessoa com uma Conta do Google". Abra a URL /exec com ?app=crm no final.
  *
  * CRM: as colunas Etapa, Responsável, Próxima ação... são preenchidas pela equipe (menus
  * suspensos). As opções ficam na aba "Listas" (pode editar) e o resumo na aba "Funil".
@@ -415,7 +415,7 @@ function reply_(obj) {
 // auxiliares (Due diligence, Compradores, Contatos, Propostas), criadas na primeira vez.
 
 // Link do web app (implantação "CRM ASPIN"), usado nas mensagens do robô.
-const CRM_APP_URL = 'https://script.google.com/macros/s/AKfycbwLe9yPFUtqOyJyyrOUnXr83SJWzQN4pyOmXfY3RklobCzy7LLrdJC8DpGHcIyTdD0P9A/exec?app=crm';
+const CRM_APP_URL = 'https://script.google.com/macros/s/AKfycbxRah-EjathN0pWmXLDl2kGZzJxEYtrJSRveEHaGF_6h7vYiP6qU9UHqU45u6_4ph1vwg/exec?app=crm';
 const CRM_EDITABLE = ['Etapa', 'Responsável', 'Próxima ação', 'Data da próxima ação',
   'Valor proposto (R$)', 'Motivo da perda', 'Observações'];
 // Itens padrão do dossiê de due diligence (a equipe pode marcar "Não se aplica").
