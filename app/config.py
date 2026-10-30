@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     # Planilha Google (Apps Script Web App) que recebe as oportunidades aprovadas.
     sheets_webhook_url: str = ""
     sheets_token: str = ""
+    # Alertas do CRM (lidos da planilha pela ação crm_export, script v7+): follow-up diário e
+    # resumo semanal (segunda) a partir desta hora local; radar do DJEN nos processos em aberto.
+    crm_alert_hour: int = Field(default=8, ge=0, le=23)
+    radar_interval_hours: float = Field(default=6, ge=1, le=168)
+    radar_max_alerts: int = Field(default=15, ge=1, le=100)
+    radar_lookback_days: int = Field(default=30, ge=1, le=365)
     # IDs numéricos do Telegram autorizados a aprovar/descartar (vazio = qualquer membro do canal).
     telegram_approvers: str = ""
     consulta_max_per_minute: int = Field(default=10, ge=1, le=120)

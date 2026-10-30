@@ -34,6 +34,7 @@ def daemon_env(monkeypatch):
     monkeypatch.setattr(worker, "redispatch_daemon", AsyncMock(return_value=True))
     monkeypatch.setattr(worker, "queued_runs", AsyncMock(return_value=[]))
     monkeypatch.setattr(worker, "_deliver_digest_now", AsyncMock())
+    monkeypatch.setattr(worker, "_crm_jobs_now", AsyncMock())
     monkeypatch.setattr(worker, "retention_job", AsyncMock(return_value={}))
     return clock, polls
 
@@ -167,3 +168,30 @@ async def test_retention_job_marks_unanswered_messages_as_expired(monkeypatch):
     report = await worker.retention_job(vacuum_full=True)
     assert report == {"mensagens_expiradas": 1, "oportunidades_removidas": 1} and vac == [True]
     assert buttons.await_args.args[2]["inline_keyboard"][0][0]["text"] == "⌛ Expirou (48h)"
+
+
+@pytest.mark.asyncio
+async def test_daemon_checks_crm_alerts_while_idle(monkeypatch, daemon_env):
+    clock, polls = daemon_env
+    monkeypatch.setattr(worker, "collector_dispatch_reason", lambda: None)
+    crm = AsyncMock()
+    monkeypatch.setattr(worker, "_crm_jobs_now", crm)
+    await worker.run_daemon(max_minutes=3)
+    assert crm.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_crm_check_is_throttled(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(worker, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(worker, "CRM_LAST_CHECK", [float("-inf")])
+    jobs = AsyncMock(return_value={"crm_followup": "enviado"})
+    monkeypatch.setattr(worker, "crm_jobs", jobs)
+    totals = {}
+    await worker._crm_jobs_now(totals)
+    clock.t += 60
+    await worker._crm_jobs_now(totals)
+    assert jobs.await_count == 1 and totals["crm"] == {"crm_followup": "enviado"}
+    clock.t += worker.CRM_CHECK_SECONDS
+    await worker._crm_jobs_now(totals)
+    assert jobs.await_count == 2
