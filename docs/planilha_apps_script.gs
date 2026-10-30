@@ -108,6 +108,9 @@ function doPost(e) {
       formatSheet_(sheet);
       return reply_({ ok: true, formatted: true });
     }
+    if (body.action === 'crm_export') {  // robô: alertas de follow-up e radar dos processos
+      return reply_(crmExport_());
+    }
     const row = body.row || {};
     const idCol = HEADERS.indexOf('ID interno') + 1;
     // Não duplica: se o bot reenviar a mesma aprovação, a linha já existente é mantida.
@@ -130,7 +133,7 @@ function doGet(e) {
   if (e && e.parameter && e.parameter.app === 'crm') {
     return crmPage_();
   }
-  return reply_({ ok: true, service: 'aspin-planilha', version: 6 });
+  return reply_({ ok: true, service: 'aspin-planilha', version: 7 });
 }
 
 /** Executável pelo editor ou pelo menu ASPIN. */
@@ -408,19 +411,86 @@ function reply_(obj) {
 
 // ===================== Web app do CRM (?app=crm) =====================
 // Publicado numa implantação própria, "Executar como: usuário que acessa", para só abrir
-// para quem já tem acesso à planilha. Lê e grava só na aba Aprovadas (as mesmas colunas do CRM).
+// para quem já tem acesso à planilha. Grava nas colunas do CRM da aba Aprovadas e nas abas
+// auxiliares (Due diligence, Compradores, Contatos, Propostas), criadas na primeira vez.
 
+// Link do web app (implantação "CRM ASPIN"), usado nas mensagens do robô.
+const CRM_APP_URL = 'https://script.google.com/macros/s/AKfycbwLe9yPFUtqOyJyyrOUnXr83SJWzQN4pyOmXfY3RklobCzy7LLrdJC8DpGHcIyTdD0P9A/exec?app=crm';
 const CRM_EDITABLE = ['Etapa', 'Responsável', 'Próxima ação', 'Data da próxima ação',
   'Valor proposto (R$)', 'Motivo da perda', 'Observações'];
+// Itens padrão do dossiê de due diligence (a equipe pode marcar "Não se aplica").
+const DD_ITEMS = [
+  'Documento de identidade e CPF/CNPJ do credor',
+  'Procuração ou contrato com o advogado do processo',
+  'Certidão de objeto e pé do processo',
+  'Ofício requisitório ou extrato do precatório',
+  'Verificar se o crédito já foi cedido a terceiros',
+  'Verificar penhora, bloqueio ou compensação',
+  'Honorários contratuais destacados',
+  'Espólio ou inventário (se o credor faleceu)',
+  'Certidões negativas do credor (cível, fiscal e trabalhista)',
+  'Conferência do valor atualizado (cálculo)',
+  'Dados bancários do credor',
+  'Minuta do contrato de cessão'
+];
+const AUX = {
+  dd: ['Due diligence', ['ID interno', 'Credor', 'Item', 'Situação', 'Observação', 'Atualizado em']],
+  buyers: ['Compradores', ['ID', 'Nome', 'Contato', 'E-mail', 'Telefone', 'Esferas', 'Naturezas', 'Tipos',
+    'Valor mínimo (R$)', 'Valor máximo (R$)', 'Deságio mínimo (%)', 'Tribunais', 'Ativo', 'Observações', 'Atualizado em']],
+  contacts: ['Contatos', ['ID interno', 'Credor', 'Data', 'Canal', 'Resultado', 'Resumo', 'Por', 'Não quer contato']],
+  proposals: ['Propostas', ['ID interno', 'Credor', 'Data', 'Valor de face (R$)', 'Pagamento previsto', 'Correção (% a.a.)',
+    'Taxa do comprador (% a.a.)', 'Comissão ÂSPIN (%)', 'Preço ao comprador (R$)', 'Oferta ao credor (R$)', 'Deságio (%)', 'Por']]
+};
 
-/** Tela do CRM. */
 function crmPage_() {
   return HtmlService.createHtmlOutputFromFile('crm')
     .setTitle('ÂSPIN · CRM de Oportunidades')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
-/** Todas as oportunidades + listas, para a tela (chamado pelo navegador). */
+function agora_() {
+  return Utilities.formatDate(new Date(), 'America/Sao_Paulo', 'dd/MM/yyyy HH:mm');
+}
+
+/** Aba auxiliar: cria com cabeçalho na primeira vez. */
+function aux_(key) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const name = AUX[key][0];
+  const headers = AUX[key][1];
+  let sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name, ss.getNumSheets());
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]).setBackground('#0B3D5C')
+      .setFontColor('#FFFFFF').setFontWeight('bold');
+    sh.setFrozenRows(1);
+    sh.setColumnWidths(1, headers.length, 160);
+    sh.getRange(2, 1, 999, headers.length).setNumberFormat('@');
+  }
+  return sh;
+}
+
+/** Linhas de uma aba auxiliar como objetos {cabeçalho: valor}, com o número da linha. */
+function auxRows_(key) {
+  const sh = aux_(key);
+  const last = sh.getLastRow();
+  if (last < 2) {
+    return [];
+  }
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
+  return sh.getRange(2, 1, last - 1, headers.length).getDisplayValues().map(function (line, i) {
+    const o = { _row: i + 2 };
+    headers.forEach(function (h, j) { o[h] = line[j]; });
+    return o;
+  });
+}
+
+function auxAppend_(key, obj) {
+  const sh = aux_(key);
+  const headers = AUX[key][1];
+  sh.appendRow(headers.map(function (h) { return obj[h] === undefined || obj[h] === null ? '' : String(obj[h]); }));
+}
+
+/** Todas as oportunidades + listas + abas auxiliares, para a tela. */
 function crmData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = sheet_();
@@ -449,15 +519,21 @@ function crmData() {
     return lists.getRange(c + '2:' + c + '100').getValues().map(function (r) { return String(r[0]).trim(); })
       .filter(String);
   };
-  const stages = col('A');
+  const strip = function (list) { return list.map(function (o) { delete o._row; return o; }); };
   return {
     rows: rows,
-    stages: stages.length ? stages : STAGES,
+    stages: col('A').length ? col('A') : STAGES,
     reasons: col('B').length ? col('B') : LOSS_REASONS,
     owners: col('C').length ? col('C') : OWNERS,
     colors: STAGE_COLORS,
+    ddItems: DD_ITEMS,
+    dd: strip(auxRows_('dd')),
+    buyers: strip(auxRows_('buyers')),
+    contacts: strip(auxRows_('contacts')),
+    proposals: strip(auxRows_('proposals')),
+    commission: 5,
     sheetUrl: ss.getUrl(),
-    loadedAt: Utilities.formatDate(new Date(), 'America/Sao_Paulo', 'dd/MM/yyyy HH:mm')
+    loadedAt: agora_()
   };
 }
 
@@ -466,50 +542,152 @@ function crmSave(id, changes) {
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sheet = sheet_();
-    const lastCol = sheet.getLastColumn();
-    const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
-    const idCol = header.indexOf('ID interno') + 1;
-    if (!idCol || sheet.getLastRow() < 2) {
-      throw new Error('Planilha sem a coluna ID interno.');
-    }
-    const ids = sheet.getRange(2, idCol, sheet.getLastRow() - 1, 1).getValues().map(function (r) { return String(r[0]); });
-    const index = ids.indexOf(String(id));
-    if (index < 0) {
-      throw new Error('Oportunidade não encontrada (a planilha mudou?). Clique em Atualizar.');
-    }
-    const row = index + 2;
-    const stageCol = header.indexOf('Etapa') + 1;
-    const oldStage = stageCol ? String(sheet.getRange(row, stageCol).getValue()) : '';
-    Object.keys(changes || {}).forEach(function (h) {
-      const c = header.indexOf(h) + 1;
-      if (CRM_EDITABLE.indexOf(h) < 0 || !c) {
-        return;
-      }
-      let v = changes[h];
-      if (h === 'Data da próxima ação') {
-        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
-        v = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : '';
-      } else if (h === 'Valor proposto (R$)') {
-        v = v === '' || v === null || isNaN(Number(v)) ? '' : Number(v);
-      } else {
-        v = String(v === null || v === undefined ? '' : v).slice(0, 2000);
-      }
-      sheet.getRange(row, c).setValue(v);
-    });
-    const newStage = stageCol ? String(sheet.getRange(row, stageCol).getValue()) : '';
-    const stampCol = header.indexOf('Etapa atualizada em') + 1;
-    if (stampCol && newStage !== oldStage) {
-      sheet.getRange(row, stampCol).setNumberFormat('@')
-        .setValue(Utilities.formatDate(new Date(), 'America/Sao_Paulo', 'dd/MM/yyyy HH:mm'));
-    }
-    SpreadsheetApp.flush();
-    const range = sheet.getRange(row, 1, 1, lastCol);
-    return crmRow_(header, range.getValues()[0], range.getDisplayValues()[0], range.getRichTextValues()[0], ss);
+    return crmSaveUnlocked_(id, changes);
   } finally {
     lock.releaseLock();
   }
+}
+
+function crmSaveUnlocked_(id, changes) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = sheet_();
+  const lastCol = sheet.getLastColumn();
+  const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+  const row = rowOf_(sheet, header, id);
+  const stageCol = header.indexOf('Etapa') + 1;
+  const oldStage = stageCol ? String(sheet.getRange(row, stageCol).getValue()) : '';
+  Object.keys(changes || {}).forEach(function (h) {
+    const c = header.indexOf(h) + 1;
+    if (CRM_EDITABLE.indexOf(h) < 0 || !c) {
+      return;
+    }
+    let v = changes[h];
+    if (h === 'Data da próxima ação') {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
+      v = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : '';
+    } else if (h === 'Valor proposto (R$)') {
+      v = v === '' || v === null || isNaN(Number(v)) ? '' : Number(v);
+    } else {
+      v = String(v === null || v === undefined ? '' : v).slice(0, 2000);
+    }
+    sheet.getRange(row, c).setValue(v);
+  });
+  const newStage = stageCol ? String(sheet.getRange(row, stageCol).getValue()) : '';
+  const stampCol = header.indexOf('Etapa atualizada em') + 1;
+  if (stampCol && newStage !== oldStage) {
+    sheet.getRange(row, stampCol).setNumberFormat('@').setValue(agora_());
+  }
+  SpreadsheetApp.flush();
+  const range = sheet.getRange(row, 1, 1, lastCol);
+  return crmRow_(header, range.getValues()[0], range.getDisplayValues()[0], range.getRichTextValues()[0], ss);
+}
+
+function rowOf_(sheet, header, id) {
+  const idCol = header.indexOf('ID interno') + 1;
+  if (!idCol || sheet.getLastRow() < 2) {
+    throw new Error('Planilha sem a coluna ID interno.');
+  }
+  const ids = sheet.getRange(2, idCol, sheet.getLastRow() - 1, 1).getValues().map(function (r) { return String(r[0]); });
+  const index = ids.indexOf(String(id));
+  if (index < 0) {
+    throw new Error('Oportunidade não encontrada (a planilha mudou?). Clique em Atualizar.');
+  }
+  return index + 2;
+}
+
+/** Due diligence: substitui os itens da oportunidade. items = [{item, situacao, obs}]. */
+function crmSaveChecklist(id, credor, items) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const sh = aux_('dd');
+    const rows = auxRows_('dd').filter(function (r) { return r['ID interno'] === String(id); });
+    rows.reverse().forEach(function (r) { sh.deleteRow(r._row); });
+    (items || []).forEach(function (it) {
+      if (!it.situacao || it.situacao === 'Pendente' && !it.obs) {
+        return;
+      }
+      auxAppend_('dd', { 'ID interno': id, 'Credor': credor, 'Item': it.item, 'Situação': it.situacao,
+        'Observação': String(it.obs || '').slice(0, 500), 'Atualizado em': agora_() });
+    });
+    return auxRows_('dd').filter(function (r) { return r['ID interno'] === String(id); }).map(function (r) { delete r._row; return r; });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Compradores: cria (sem ID) ou atualiza (com ID). */
+function crmSaveBuyer(b) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const sh = aux_('buyers');
+    const headers = AUX.buyers[1];
+    const obj = {};
+    headers.forEach(function (h) { obj[h] = b[h] === undefined || b[h] === null ? '' : String(b[h]).slice(0, 500); });
+    obj['Atualizado em'] = agora_();
+    if (!obj['Ativo']) {
+      obj['Ativo'] = 'Sim';
+    }
+    const found = obj['ID'] ? auxRows_('buyers').filter(function (r) { return r['ID'] === obj['ID']; })[0] : null;
+    if (found) {
+      sh.getRange(found._row, 1, 1, headers.length).setValues([headers.map(function (h) { return obj[h]; })]);
+    } else {
+      obj['ID'] = 'C' + Utilities.getUuid().slice(0, 8);
+      auxAppend_('buyers', obj);
+    }
+    return obj;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Contatos com o credor (histórico + "não quer contato"). */
+function crmAddContact(id, credor, c) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const obj = { 'ID interno': id, 'Credor': credor, 'Data': agora_(), 'Canal': c.canal, 'Resultado': c.resultado,
+      'Resumo': String(c.resumo || '').slice(0, 1000), 'Por': c.por, 'Não quer contato': c.optout ? 'Sim' : 'Não' };
+    auxAppend_('contacts', obj);
+    return obj;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Proposta calculada: guarda o histórico e atualiza o "Valor proposto" da oportunidade. */
+function crmSaveProposal(id, credor, p) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const obj = { 'ID interno': id, 'Credor': credor, 'Data': agora_(), 'Valor de face (R$)': p.face,
+      'Pagamento previsto': p.pagamento, 'Correção (% a.a.)': p.correcao, 'Taxa do comprador (% a.a.)': p.taxa,
+      'Comissão ÂSPIN (%)': p.comissao, 'Preço ao comprador (R$)': p.preco, 'Oferta ao credor (R$)': p.oferta,
+      'Deságio (%)': p.desagio, 'Por': p.por };
+    auxAppend_('proposals', obj);
+    const row = crmSaveUnlocked_(id, { 'Valor proposto (R$)': Number(p.oferta) });
+    return { proposal: obj, row: row };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Para o robô (alertas e radar): oportunidades em formato enxuto. */
+function crmExport_() {
+  const d = crmData();
+  const pick = function (r) {
+    return {
+      id: r['ID interno'], processo: r['Processo'] || '', linkProcesso: r['Link do processo'] || '',
+      credor: r['Credor'] || '', devedor: r['Devedor'] || '', tribunal: r['Tribunal'] || '', tipo: r['Tipo'] || '',
+      valor: typeof r['Valor (R$)'] === 'number' ? r['Valor (R$)'] : Number(r['Valor (R$)']) || 0,
+      nota: typeof r['Nota ASPIN (0-10)'] === 'number' ? r['Nota ASPIN (0-10)'] : Number(r['Nota ASPIN (0-10)']) || 0,
+      etapa: r['Etapa'] || 'Nova', responsavel: r['Responsável'] || '', proximaAcao: r['Próxima ação'] || '',
+      dataProximaAcao: r['Data da próxima ação'] || '', etapaAtualizadaEm: r['Etapa atualizada em'] || '',
+      comissao: typeof r['Comissão estimada (R$)'] === 'number' ? r['Comissão estimada (R$)'] : Number(r['Comissão estimada (R$)']) || 0
+    };
+  };
+  return { ok: true, rows: d.rows.map(pick), stages: d.stages, appUrl: CRM_APP_URL };
 }
 
 /** Uma linha da planilha como objeto simples (datas viram texto: o navegador não recebe Date). */
