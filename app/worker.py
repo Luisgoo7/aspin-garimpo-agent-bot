@@ -251,12 +251,18 @@ def format_alert_compact(opp: dict, position: int | None = None, total: int | No
 
 
 SHEET_HEADERS = (
-    "Aprovado em", "Aprovado por", "Nota ASPIN (0-10)", "Valor (R$)", "Credor", "Devedor", "Tribunal", "Tipo",
+    "Aprovado em", "Aprovado por", "Nota ASPIN (0-10)",
+    "Etapa", "Responsável", "Próxima ação", "Data da próxima ação",
+    "Valor (R$)", "Credor", "Devedor", "Tribunal", "Tipo",
     "Processo", "Data de expedição (ofício)", "Data base", "Natureza", "Preferência legal", "Terceiro interessado", "Confirmado DataJud",
     "Critérios atendidos", "Confiança IA", "Comissão estimada (R$)", "Honorários destacados (R$)",
     "Nº requisição", "Classe", "Órgão julgador", "Processo referência", "Assunto", "Trânsito em julgado",
+    "Valor proposto (R$)", "Motivo da perda", "Observações", "Etapa atualizada em",
     "Fonte", "Publicação (trecho)", "ID interno",
 )
+# Colunas do CRM: a equipe preenche na planilha (menus suspensos); o bot manda vazias.
+CRM_HEADERS = ("Etapa", "Responsável", "Próxima ação", "Data da próxima ação",
+               "Valor proposto (R$)", "Motivo da perda", "Observações", "Etapa atualizada em")
 
 
 # Fora das colunas: o script da planilha usa para tornar o nº do Processo clicável.

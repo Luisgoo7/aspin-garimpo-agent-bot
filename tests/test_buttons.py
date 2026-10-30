@@ -48,6 +48,12 @@ def test_sheet_row_links_the_process_to_the_cnj_public_search():
     assert worker.process_url("123") == ""
 
 
+def test_sheet_row_leaves_crm_columns_for_the_team():
+    row = worker.sheet_row(oficio_opp())
+    assert set(worker.CRM_HEADERS) <= set(HEADERS)
+    assert all(row[h] == "" for h in worker.CRM_HEADERS)  # o bot nunca preenche a negociação
+
+
 def test_apps_script_uses_the_same_columns_as_the_spreadsheet():
     script = open("docs/planilha_apps_script.gs", encoding="utf-8").read()
     start = script.index("const HEADERS = [")
