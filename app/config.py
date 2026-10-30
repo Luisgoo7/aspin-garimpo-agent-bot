@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     djen_tribunals: str = ""
     max_document_age_days: int = Field(default=30, ge=1, le=365)
     simulate_failure: str = ""
+    # O termo de uso da API pública do DataJud proíbe uso comercial. false = o bot não chama o
+    # DataJud (coleta, sinal de expedição, /processo). Padrão true até a decisão jurídica.
     enable_datajud: bool = True
     enable_djen: bool = True
     enable_tjsp_probe: bool = True

@@ -159,11 +159,14 @@ async def djen_lookup(digits: str) -> dict:
             "requisicao_em": (mention.get("data_disponibilizacao") or mention.get("dataDisponibilizacao")) if mention else None}
 
 
-def summarize(digits: str, process: dict | None, djen: dict | None, internal: dict | None, max_amount=None) -> str:
+def summarize(digits: str, process: dict | None, djen: dict | None, internal: dict | None, max_amount=None,
+              datajud_enabled: bool = True) -> str:
     """Resumo HTML curto para o Telegram."""
     e = html.escape
     lines = [f"<b>📄 {e(format_cnj(digits))}</b>"]
-    if process is None:
+    if not datajud_enabled:
+        lines.append("Consulta ao DataJud desativada (ENABLE_DATAJUD=false).")
+    elif process is None:
         lines.append("Não encontrado no DataJud. Pode ser processo recente (a indexação do CNJ atrasa semanas) "
                      "ou em segredo de justiça.")
     else:

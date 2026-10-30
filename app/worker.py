@@ -84,6 +84,17 @@ def decide_outcome(metrics: dict, errors: list[str]) -> str:
     return "success"
 
 
+def datajud_signal(cnj) -> dict | None:
+    """Sinal do DataJud gravado para o processo; None com ENABLE_DATAJUD=false.
+
+    O termo de uso da API pública do DataJud proíbe uso comercial: desligado, o bot
+    não coleta nem usa nada do DataJud (nem o que já estava no banco).
+    """
+    if not settings.enable_datajud:
+        return None
+    return storage.datajud_signal(cnj)
+
+
 def require_configuration():
     missing = settings.configuration_errors()
     if missing:
@@ -373,18 +384,20 @@ async def handle_command(post: dict, approvers: set[str]) -> bool:
     if len(digits) != 20 or not consulta.cnj_check_digits_ok(digits):
         await send_message("Número CNJ inválido. Use o formato 0000000-00.0000.0.00.0000.", chat_id=chat_id, reply_to=reply_to)
         return True
-    if not consulta.alias_from_cnj(digits):
+    if settings.enable_datajud and not consulta.alias_from_cnj(digits):
         await send_message("Esse tribunal não tem índice público no DataJud (ex.: STF).", chat_id=chat_id, reply_to=reply_to)
         return True
     # Aviso imediato: a API do CNJ costuma levar de 10 s a 1 min.
     await send_message(f"🔎 Consultando {consulta.format_cnj(digits)} no CNJ… pode levar até 1 minuto.",
                        chat_id=chat_id, reply_to=reply_to)
-    try:
-        process = await consulta.datajud_lookup(digits)
-    except (consulta.ConsultaIndisponivel, DataJudError):
-        await send_message("A API do CNJ (DataJud) está sobrecarregada agora; tente novamente em alguns minutos. "
-                           "Isso não significa que o processo não existe.", chat_id=chat_id, reply_to=reply_to)
-        return True
+    process = None
+    if settings.enable_datajud:  # desligado (ENABLE_DATAJUD=false): só DJEN e histórico do bot
+        try:
+            process = await consulta.datajud_lookup(digits)
+        except (consulta.ConsultaIndisponivel, DataJudError):
+            await send_message("A API do CNJ (DataJud) está sobrecarregada agora; tente novamente em alguns minutos. "
+                               "Isso não significa que o processo não existe.", chat_id=chat_id, reply_to=reply_to)
+            return True
     djen = None
     max_amount = None
     try:
@@ -401,11 +414,12 @@ async def handle_command(post: dict, approvers: set[str]) -> bool:
         internal = {"documents": insight.get("documents", 0)}
         if opp:
             opp = dict(opp)
-            opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+            opp["datajud_signal"] = datajud_signal(opp.get("cnj_number"))
             internal.update(nota=nota_aspin(opp)[0], decision=opp.get("decision"))
     except Exception:
         internal = None
-    await send_message(consulta.summarize(digits, process, djen, internal, max_amount), html=True,
+    await send_message(consulta.summarize(digits, process, djen, internal, max_amount,
+                                          datajud_enabled=settings.enable_datajud), html=True,
                        chat_id=chat_id, reply_to=reply_to)
     return True
 
@@ -504,7 +518,7 @@ async def sync_sheet(metrics: dict) -> None:
             metrics["sheet_format_pending"] = str(exc)
     for opp in storage.sheet_outbox(50):
         try:
-            opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+            opp["datajud_signal"] = datajud_signal(opp.get("cnj_number"))
         except Exception:
             opp["datajud_signal"] = None
         try:
@@ -579,7 +593,7 @@ async def maybe_send_status(metrics: dict, errors: list[str]):
 async def _collect_datajud(metrics: dict, errors: list[str]):
     """Sinais de expedição de precatório/RPV no DataJud, com cursor por tribunal."""
     if not settings.enable_datajud:
-        metrics["datajud_disabled"] = True
+        metrics["datajud_disabled"] = True  # ENABLE_DATAJUD=false: nenhuma chamada ao DataJud
         return
     aliases = [canonical_alias(x) for x in settings.datajud_tribunals.split(",") if x.strip()]
     # Rodízio: cada ciclo começa num tribunal diferente, para o orçamento de tempo
@@ -776,9 +790,11 @@ async def _deliver_digest(metrics: dict, errors: list[str], now: datetime | None
         # Avalia uma amostra ampla (já ordenada por valor × confiança no banco) e
         # reordena com os campos do ofício: natureza, preferência, cessão.
         pool = storage.pending_alerts(settings.digest_pool_size)
+        if not settings.enable_datajud:
+            metrics["datajud_signal_disabled"] = True
         for opp in pool:
             try:
-                opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+                opp["datajud_signal"] = datajud_signal(opp.get("cnj_number"))
             except Exception:
                 opp["datajud_signal"] = None
         best = sorted(pool, key=rank_score, reverse=True)[:remaining]
@@ -813,7 +829,7 @@ async def _send_pending_alerts(metrics: dict, errors: list[str], opportunities: 
                 raise RuntimeError("Telegram: falha simulada")
             if "datajud_signal" not in opp:
                 try:
-                    opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+                    opp["datajud_signal"] = datajud_signal(opp.get("cnj_number"))
                 except Exception:
                     opp["datajud_signal"] = None
             total = settings.digest_top_n if slot else None
@@ -992,7 +1008,7 @@ async def send_preview() -> int:
     try:
         pool = storage.pending_alerts(settings.digest_pool_size)
         for opp in pool:
-            opp["datajud_signal"] = storage.datajud_signal(opp.get("cnj_number"))
+            opp["datajud_signal"] = datajud_signal(opp.get("cnj_number"))
         best = sorted(pool, key=rank_score, reverse=True)[:settings.digest_top_n]
     except Exception as exc:
         log.warning("Prévia sem dados do banco: %s", storage.safe_error(exc))
