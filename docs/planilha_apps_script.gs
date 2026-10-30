@@ -67,7 +67,8 @@ const WIDTHS = {
 };
 
 function onOpen() {
-  SpreadsheetApp.getUi().createMenu('ASPIN').addItem('Formatar planilha', 'formatarPlanilha').addToUi();
+  SpreadsheetApp.getUi().createMenu('ASPIN').addItem('Formatar planilha', 'formatarPlanilha')
+    .addItem('Proteger planilha', 'protegerPlanilha').addToUi();
 }
 
 /** Ao mudar a Etapa, registra quando mudou (gatilho simples, não precisa de autorização). */
@@ -141,6 +142,54 @@ function formatarPlanilha() {
   const sheet = sheet_();
   ensureLayout_(sheet);
   formatSheet_(sheet);
+  protegerPlanilha();
+}
+
+const PROTECAO = 'ASPIN: protegido (só o dono altera)';
+
+/**
+ * Proteção contra exclusão acidental. Só o dono da planilha (e o CRM e o robô, que rodam com a conta
+ * dele) consegue apagar linhas/colunas ou mudar os dados do processo. A equipe continua podendo
+ * preencher as colunas da negociação direto na planilha e editar as opções da aba Listas.
+ */
+function protegerPlanilha() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  [SpreadsheetApp.ProtectionType.SHEET, SpreadsheetApp.ProtectionType.RANGE].forEach(function (tipo) {
+    ss.getProtections(tipo).forEach(function (pr) {
+      if (pr.getDescription() === PROTECAO) {
+        pr.remove();
+      }
+    });
+  });
+  const travar = function (pr) {
+    pr.setDescription(PROTECAO);
+    pr.removeEditors(pr.getEditors());
+    if (pr.canDomainEdit()) {
+      pr.setDomainEdit(false);
+    }
+    return pr;
+  };
+  // Aprovadas: tudo travado, exceto as colunas da negociação (da linha 2 para baixo).
+  const sheet = sheet_();
+  const header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const livres = CRM_EDITABLE.concat(['Etapa atualizada em']).map(function (h) {
+    const c = header.indexOf(h) + 1;
+    return c ? sheet.getRange(2, c, sheet.getMaxRows() - 1, 1) : null;
+  }).filter(Boolean);
+  travar(sheet.protect()).setUnprotectedRanges(livres);
+  // Abas que só o CRM preenche: travadas por inteiro.
+  ['Funil', 'Due diligence', 'Compradores', 'Contatos', 'Propostas', 'Excluídas'].forEach(function (nome) {
+    const aba = ss.getSheetByName(nome);
+    if (aba) {
+      travar(aba.protect());
+    }
+  });
+  // Listas: a equipe edita as opções, mas não o cabeçalho.
+  const listas = ss.getSheetByName('Listas');
+  if (listas) {
+    travar(listas.getRange(1, 1, 1, Math.max(listas.getLastColumn(), 3)).protect());
+  }
+  return 'ok';
 }
 
 function sheet_() {
