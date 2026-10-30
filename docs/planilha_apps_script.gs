@@ -10,6 +10,10 @@
  * Para formatar na hora: escolha a função "formatarPlanilha" no topo e clique em Executar
  * (ou use o menu ASPIN > Formatar planilha, que aparece ao abrir a planilha).
  *
+ * Web app do CRM (tela visual): crie também o arquivo HTML "crm" (Arquivo > + > HTML) com o
+ * conteúdo de docs/crm.html e publique uma implantação separada como app da Web, executando como
+ * "Usuário que acessa o app da Web". Abra a URL /exec com ?app=crm no final.
+ *
  * CRM: as colunas Etapa, Responsável, Próxima ação... são preenchidas pela equipe (menus
  * suspensos). As opções ficam na aba "Listas" (pode editar) e o resumo na aba "Funil".
  */
@@ -121,8 +125,12 @@ function doPost(e) {
   }
 }
 
-function doGet() {
-  return reply_({ ok: true, service: 'aspin-planilha', version: 5 });
+function doGet(e) {
+  // ?app=crm abre a tela do CRM; sem parâmetro, responde ao bot (checagem de versão).
+  if (e && e.parameter && e.parameter.app === 'crm') {
+    return crmPage_();
+  }
+  return reply_({ ok: true, service: 'aspin-planilha', version: 6 });
 }
 
 /** Executável pelo editor ou pelo menu ASPIN. */
@@ -396,4 +404,131 @@ function funnelSheet_(ss) {
 
 function reply_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ===================== Web app do CRM (?app=crm) =====================
+// Publicado numa implantação própria, "Executar como: usuário que acessa", para só abrir
+// para quem já tem acesso à planilha. Lê e grava só na aba Aprovadas (as mesmas colunas do CRM).
+
+const CRM_EDITABLE = ['Etapa', 'Responsável', 'Próxima ação', 'Data da próxima ação',
+  'Valor proposto (R$)', 'Motivo da perda', 'Observações'];
+
+/** Tela do CRM. */
+function crmPage_() {
+  return HtmlService.createHtmlOutputFromFile('crm')
+    .setTitle('ÂSPIN · CRM de Oportunidades')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/** Todas as oportunidades + listas, para a tela (chamado pelo navegador). */
+function crmData() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = sheet_();
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+  const rows = [];
+  if (lastRow > 1) {
+    const range = sheet.getRange(2, 1, lastRow - 1, lastCol);
+    const values = range.getValues();
+    const shown = range.getDisplayValues();
+    const rich = range.getRichTextValues();
+    const idCol = header.indexOf('ID interno');
+    values.forEach(function (line, i) {
+      if (idCol >= 0 && !String(line[idCol] || '').trim()) {
+        return;
+      }
+      rows.push(crmRow_(header, line, shown[i], rich[i], ss));
+    });
+  }
+  const lists = ss.getSheetByName('Listas');
+  const col = function (c) {
+    if (!lists) {
+      return [];
+    }
+    return lists.getRange(c + '2:' + c + '100').getValues().map(function (r) { return String(r[0]).trim(); })
+      .filter(String);
+  };
+  const stages = col('A');
+  return {
+    rows: rows,
+    stages: stages.length ? stages : STAGES,
+    reasons: col('B').length ? col('B') : LOSS_REASONS,
+    owners: col('C').length ? col('C') : OWNERS,
+    colors: STAGE_COLORS,
+    sheetUrl: ss.getUrl(),
+    loadedAt: Utilities.formatDate(new Date(), 'America/Sao_Paulo', 'dd/MM/yyyy HH:mm')
+  };
+}
+
+/** Grava as mudanças de UMA oportunidade (só colunas do CRM). Devolve a linha atualizada. */
+function crmSave(id, changes) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = sheet_();
+    const lastCol = sheet.getLastColumn();
+    const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+    const idCol = header.indexOf('ID interno') + 1;
+    if (!idCol || sheet.getLastRow() < 2) {
+      throw new Error('Planilha sem a coluna ID interno.');
+    }
+    const ids = sheet.getRange(2, idCol, sheet.getLastRow() - 1, 1).getValues().map(function (r) { return String(r[0]); });
+    const index = ids.indexOf(String(id));
+    if (index < 0) {
+      throw new Error('Oportunidade não encontrada (a planilha mudou?). Clique em Atualizar.');
+    }
+    const row = index + 2;
+    const stageCol = header.indexOf('Etapa') + 1;
+    const oldStage = stageCol ? String(sheet.getRange(row, stageCol).getValue()) : '';
+    Object.keys(changes || {}).forEach(function (h) {
+      const c = header.indexOf(h) + 1;
+      if (CRM_EDITABLE.indexOf(h) < 0 || !c) {
+        return;
+      }
+      let v = changes[h];
+      if (h === 'Data da próxima ação') {
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
+        v = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : '';
+      } else if (h === 'Valor proposto (R$)') {
+        v = v === '' || v === null || isNaN(Number(v)) ? '' : Number(v);
+      } else {
+        v = String(v === null || v === undefined ? '' : v).slice(0, 2000);
+      }
+      sheet.getRange(row, c).setValue(v);
+    });
+    const newStage = stageCol ? String(sheet.getRange(row, stageCol).getValue()) : '';
+    const stampCol = header.indexOf('Etapa atualizada em') + 1;
+    if (stampCol && newStage !== oldStage) {
+      sheet.getRange(row, stampCol).setNumberFormat('@')
+        .setValue(Utilities.formatDate(new Date(), 'America/Sao_Paulo', 'dd/MM/yyyy HH:mm'));
+    }
+    SpreadsheetApp.flush();
+    const range = sheet.getRange(row, 1, 1, lastCol);
+    return crmRow_(header, range.getValues()[0], range.getDisplayValues()[0], range.getRichTextValues()[0], ss);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Uma linha da planilha como objeto simples (datas viram texto: o navegador não recebe Date). */
+function crmRow_(header, line, shown, rich, ss) {
+  const tz = ss.getSpreadsheetTimeZone();
+  const o = {};
+  header.forEach(function (h, j) {
+    let v = line[j];
+    if (h === 'Data da próxima ação') {
+      v = v instanceof Date ? Utilities.formatDate(v, tz, 'yyyy-MM-dd') : '';
+    } else if (v instanceof Date) {
+      v = shown[j];
+    } else if (typeof v !== 'number') {
+      v = String(v === null || v === undefined ? '' : v);
+    }
+    o[h] = v;
+    if ((h === 'Processo' || h === 'Fonte') && rich[j] && rich[j].getLinkUrl()) {
+      o[h === 'Processo' ? 'Link do processo' : 'Link da fonte'] = rich[j].getLinkUrl();
+    }
+  });
+  return o;
 }
