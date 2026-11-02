@@ -614,8 +614,9 @@ function crmSaveUnlocked_(id, changes) {
     }
     let v = changes[h];
     if (h === 'Data da próxima ação') {
+      // Meio-dia no fuso da planilha: assim o dia nunca "volta" por diferença de fuso.
       const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
-      v = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : '';
+      v = m ? Utilities.parseDate(m[1] + '-' + m[2] + '-' + m[3] + ' 12:00', ss.getSpreadsheetTimeZone(), 'yyyy-MM-dd HH:mm') : '';
     } else if (h === 'Valor proposto (R$)') {
       v = v === '' || v === null || isNaN(Number(v)) ? '' : Number(v);
     } else {
