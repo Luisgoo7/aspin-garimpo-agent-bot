@@ -6,8 +6,6 @@ on:
   schedule:
     - cron: '40 9 * * 1-5'
     - cron: '20 10 * * 1-5'
-  push:
-    branches: [feat/newsletter-radar]   # TEMPORÁRIO: teste da branch (só monta, não envia)
   workflow_dispatch:
     inputs:
       modo:
@@ -56,7 +54,6 @@ jobs:
       - name: Radar ASPIN
         run: |
           MODO="${{ github.event.inputs.modo }}"
-          [ "${{ github.event_name }}" = "push" ] && MODO=teste
           case "$MODO" in
             teste)  python -m app.newsletter --dry-run --force --out radar.html ;;
             enviar) python -m app.newsletter --force --out radar.html ;;
