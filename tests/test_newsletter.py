@@ -53,9 +53,17 @@ def test_filtro_mantem_mercado_e_prefere_fonte_oficial():
     assert nl.filtrar(jota, ja_enviados={"https://exemplo.jus.br/a"}) == []
 
 
+def test_sem_ia_so_usa_itens_fortes():
+    fraco = nl.Item("JOTA", "Debate sobre ICMS", "https://j/1", None, "", False)
+    forte = nl.Item("STJ", "STJ e o precatório alimentar", "https://s/2", None, "", True)
+    assert nl.relevancia(fraco) == 1 and nl.filtrar([fraco], set()) == [fraco]
+    escolhidos, _ = nl.curadoria_sem_ia([forte, fraco])
+    assert [i.link for i in escolhidos] == ["https://s/2"]
+
+
 def test_fonte_geral_exige_termo_especifico():
     geral = nl.Item("Senado", "Senado aprova orçamento da saúde", "https://s/1", None, "Texto sobre ICMS e Selic.", True, False)
-    assert nl.relevancia(geral) < 2
+    assert nl.relevancia(geral) == 0
 
 
 def test_checagem_anti_invencao():

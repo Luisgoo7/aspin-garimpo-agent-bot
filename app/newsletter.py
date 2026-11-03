@@ -302,7 +302,8 @@ def filtrar(itens: list[Item], ja_enviados: set[str]) -> list[Item]:
     """Mantém só o que é do mercado, sem repetir edições anteriores; fonte oficial vence duplicata."""
     por_titulo: dict[str, Item] = {}
     for item in itens:
-        if item.link in ja_enviados or relevancia(item) < 2:
+        # 1 ponto basta: a IA dá a nota final. Fontes gerais só pontuam com termo específico.
+        if item.link in ja_enviados or relevancia(item) < 1:
             continue
         chave = _chave(item.titulo)
         atual = por_titulo.get(chave)
@@ -476,7 +477,7 @@ def aplicar_curadoria(itens: list[Item], resposta: dict) -> tuple[list[Item], li
 def curadoria_sem_ia(itens: list[Item]) -> tuple[list[Item], list[str]]:
     """Plano B quando todas as IAs falham: os mais relevantes por palavra-chave, com o texto oficial."""
     escolhidos = []
-    for item in itens[:MAX_ITENS]:
+    for item in [i for i in itens if relevancia(i) >= 2][:MAX_ITENS]:
         item.nota = min(10, 4 + relevancia(item))
         item.prioridade = "media" if relevancia(item) >= 6 else "informativo"
         item.secao = "tributario" if "icms" in _sem_acentos(item.texto_fonte) or "tribut" in _sem_acentos(item.texto_fonte) else (
