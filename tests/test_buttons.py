@@ -277,11 +277,12 @@ async def test_dispatch_uses_github_api_with_job_token(monkeypatch):
 
 def test_nota_aspin_is_explainable():
     recent = dict(oficio_opp()["classification"], published_at=datetime.now(timezone.utc).isoformat())
-    nota, items = worker.nota_aspin(dict(oficio_opp(classification=recent), datajud_signal={"published_at": None}))
+    nota, items = worker.nota_aspin(dict(oficio_opp(classification=recent, amount=600000.0),
+                                         datajud_signal={"published_at": None}))
     assert nota == 10 and all(ok for _, _, ok, _ in items)
     ceded = dict(oficio_opp(classification=dict(oficio_opp()["classification"], third_party_interest=True,
                                                  credit_nature="comum", legal_preference=None)))
-    assert worker.nota_aspin(ceded)[0] == 4  # valor + expedido
+    assert worker.nota_aspin(ceded)[0] == 3  # expedido + devedor federal
     msg = worker.format_alert_compact(oficio_opp())
     assert "⭐ <b>Nota ASPIN 7/10</b>" in msg.splitlines()
     assert "IA 90%" not in msg and "✅" not in msg and "▫️" not in msg  # notificação mostra só a nota

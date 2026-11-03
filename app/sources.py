@@ -535,6 +535,87 @@ async def search_djen(
     return result
 
 
+@dataclass
+class DjenProcessResult:
+    """Comunicações de um processo no DJEN. ok=False: consulta incompleta (não usar como 'nada novo')."""
+
+    rows: list[dict]
+    errors: list[str]
+    ok: bool = False
+    blocked: bool = False  # 403 ou teto de requests: parar a passada inteira
+
+
+def djen_row_id(row: dict[str, Any]) -> str:
+    """Identidade estável de uma comunicação (hash/id da API ou hash do conteúdo)."""
+
+    return _row_identity(row)
+
+
+async def search_djen_process(
+    numero: str,
+    since: date,
+    until: date,
+    client: httpx.AsyncClient | None = None,
+    request_count: list[int] | None = None,
+    max_pages: int = 3,
+) -> DjenProcessResult:
+    """Comunicações do DJEN de um processo (numeroProcesso), entre since e until.
+
+    Mesmos cuidados da busca por termo: timeout, até 3 tentativas para rede/429/5xx/
+    "sistema ocupado", espaçamento entre requests e teto global (request_count
+    compartilhado entre processos de uma mesma passada).
+    """
+
+    result = DjenProcessResult(rows=[], errors=[])
+    digits = "".join(ch for ch in str(numero or "") if ch.isdigit())
+    if len(digits) != 20:
+        result.errors.append("djen_processo: número CNJ inválido")
+        return result
+    request_count = request_count if request_count is not None else [0]
+    max_requests = _positive_int("djen_max_requests", 80)
+    request_delay = _nonnegative_float("djen_request_delay", 0.5)
+    page_size = 100
+    own_client = client is None
+    if own_client:
+        timeout_seconds = _nonnegative_float("djen_timeout_seconds", 30.0) or 30.0
+        client = httpx.AsyncClient(timeout=timeout_seconds, headers={"User-Agent": DJEN_USER_AGENT})
+    unique: dict[str, dict] = {}
+    try:
+        for page in range(1, max(1, max_pages) + 1):
+            params = {
+                "numeroProcesso": digits,
+                "dataDisponibilizacaoInicio": since.isoformat(),
+                "dataDisponibilizacaoFim": until.isoformat(),
+                "itensPorPagina": page_size,
+                "pagina": page,
+            }
+            fetched = await _fetch_page(client, params, result.errors, request_count, max_requests, request_delay)
+            if fetched.global_stop or fetched.budget_exhausted:
+                result.blocked = True
+                return result
+            payload = fetched.payload
+            if payload is None:
+                return result
+            items = payload.get("items")
+            if not isinstance(items, list):
+                _append_error(result.errors, "djen_shape: items inválido na consulta por processo")
+                return result
+            for row in items:
+                if isinstance(row, dict):
+                    unique.setdefault(_row_identity(row), row)
+            count, _ = _extract_count(payload)
+            seen = (page - 1) * page_size + len(items)
+            has_more = seen < count if count is not None else len(items) >= page_size
+            if not has_more:
+                break
+    finally:
+        if own_client:
+            await client.aclose()
+    result.rows = list(unique.values())
+    result.ok = True
+    return result
+
+
 def _redacted_exception_name(exc: BaseException) -> str:
     """Evita vazar URL, query string ou conteúdo de resposta nos logs."""
 

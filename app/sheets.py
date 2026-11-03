@@ -13,6 +13,7 @@ def configured() -> bool:
 
 
 LAYOUT_VERSION = 5  # v5: colunas do CRM (Etapa, Responsável, Próxima ação...) e abas Listas/Funil
+CRM_EXPORT_VERSION = 7  # v7: ação crm_export (leitura das negociações para os alertas do bot)
 
 
 async def script_version() -> int:
@@ -45,7 +46,30 @@ async def append_row(row: dict) -> bool:
     return await _post({"token": settings.sheets_token.strip(), "row": row})
 
 
+async def crm_export() -> dict | None:
+    """Lê as negociações do CRM ({"rows", "stages", "appUrl"}).
+
+    None = script publicado ainda não tem a ação (versão < 7) ou planilha não configurada.
+    Nesse caso nada é enviado: o script antigo gravaria o pedido como uma linha em branco.
+    """
+    if not configured() or await script_version() < CRM_EXPORT_VERSION:
+        return None
+    data = await _request({"token": settings.sheets_token.strip(), "action": "crm_export"})
+    if not isinstance(data.get("rows"), list):
+        raise SheetsError("planilha: crm_export sem a lista de linhas")
+    data["rows"] = [r for r in data["rows"] if isinstance(r, dict)]
+    return data
+
+
 async def _post(payload: dict, expect: str | None = None) -> bool:
+    data = await _request(payload)
+    if expect and not data.get(expect):
+        raise SheetsError("planilha: script desatualizado (cole a versão nova e publique uma nova versão)")
+    return True
+
+
+async def _request(payload: dict) -> dict:
+    """POST ao Web App; devolve o JSON já validado (ok=true) ou levanta SheetsError sanitizado."""
     if not configured():
         raise SheetsError("planilha não configurada (SHEETS_WEBHOOK_URL/SHEETS_TOKEN)")
     async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
@@ -60,8 +84,7 @@ async def _post(payload: dict, expect: str | None = None) -> bool:
     except ValueError:
         # Web App sem acesso "Qualquer pessoa" devolve a página de login do Google.
         raise SheetsError("planilha: resposta não é JSON (confira se o Web App está com acesso 'Qualquer pessoa')") from None
-    if data.get("ok") is not True:
-        raise SheetsError(f"planilha: recusada ({str(data.get('error') or 'sem detalhe')[:60]})")
-    if expect and not data.get(expect):
-        raise SheetsError("planilha: script desatualizado (cole a versão nova e publique uma nova versão)")
-    return True
+    if not isinstance(data, dict) or data.get("ok") is not True:
+        detail = data.get("error") if isinstance(data, dict) else None
+        raise SheetsError(f"planilha: recusada ({str(detail or 'sem detalhe')[:60]})")
+    return data
