@@ -134,6 +134,9 @@ function doGet(e) {
   if (e && e.parameter && e.parameter.app === 'crm') {
     return crmPage_();
   }
+  if (e && e.parameter && e.parameter.app === 'verifica') {
+    return crmVerifica_(e.parameter.c);
+  }
   return reply_({ ok: true, service: 'aspin-planilha', version: 7 });
 }
 
@@ -465,6 +468,10 @@ function reply_(obj) {
 
 // Link do web app (implantação "CRM ASPIN"), usado nas mensagens do robô.
 const CRM_APP_URL = 'https://script.google.com/macros/s/AKfycbxRah-EjathN0pWmXLDl2kGZzJxEYtrJSRveEHaGF_6h7vYiP6qU9UHqU45u6_4ph1vwg/exec?app=crm';
+// Link público do CRM (implantação AKfycbxRah), usado no QR code de verificação das propostas.
+const CRM_LINK = 'https://script.google.com/macros/s/AKfycbxRah-EjathN0pWmXLDl2kGZzJxEYtrJSRveEHaGF_6h7vYiP6qU9UHqU45u6_4ph1vwg/exec';
+// Ícone da aba do navegador (logo oficial, arquivo docs/favicon_aspin.png do repositório).
+const CRM_FAVICON = 'https://raw.githubusercontent.com/Luisgoo7/aspin-garimpo-agent-bot/598b3b7f2fd65bee8eca56f59cc097c27113ebe8/docs/favicon_aspin.png';
 const CRM_EDITABLE = ['Etapa', 'Responsável', 'Próxima ação', 'Data da próxima ação',
   'Valor proposto (R$)', 'Motivo da perda', 'Observações'];
 // Itens padrão do dossiê de due diligence (a equipe pode marcar "Não se aplica").
@@ -488,13 +495,63 @@ const AUX = {
     'Valor mínimo (R$)', 'Valor máximo (R$)', 'Deságio mínimo (%)', 'Tribunais', 'Ativo', 'Observações', 'Atualizado em']],
   contacts: ['Contatos', ['ID interno', 'Credor', 'Data', 'Canal', 'Resultado', 'Resumo', 'Por', 'Não quer contato']],
   proposals: ['Propostas', ['ID interno', 'Credor', 'Data', 'Valor de face (R$)', 'Pagamento previsto', 'Correção (% a.a.)',
-    'Taxa do comprador (% a.a.)', 'Comissão ASPIN (%)', 'Preço ao comprador (R$)', 'Oferta ao credor (R$)', 'Deságio (%)', 'Por']]
+    'Taxa do comprador (% a.a.)', 'Comissão ASPIN (%)', 'Preço ao comprador (R$)', 'Oferta ao credor (R$)', 'Deságio (%)', 'Por', 'Código']]
 };
 
 function crmPage_() {
   return HtmlService.createHtmlOutputFromFile('crm')
     .setTitle('ASPIN · CRM de Oportunidades')
+    .setFaviconUrl(CRM_FAVICON)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/** Lista de documentos da due diligence: a editada pela equipe (CRM_DD_ITENS) ou a padrão. */
+function ddItens_() {
+  try {
+    const l = JSON.parse(PropertiesService.getScriptProperties().getProperty('CRM_DD_ITENS') || 'null');
+    return Array.isArray(l) && l.length ? l : DD_ITEMS;
+  } catch (e) {
+    return DD_ITEMS;
+  }
+}
+
+/** Salva a lista de documentos da due diligence usada em todas as oportunidades. */
+function crmSetDDItems(list) {
+  const vistos = {};
+  const l = (list || []).map(function (x) { return String(x || '').replace(/\s+/g, ' ').trim().slice(0, 200); })
+    .filter(function (x) { const k = x.toLowerCase(); if (!x || vistos[k]) { return false; } vistos[k] = 1; return true; }).slice(0, 60);
+  if (!l.length) {
+    throw new Error('A lista precisa ter pelo menos um documento.');
+  }
+  PropertiesService.getScriptProperties().setProperty('CRM_DD_ITENS', JSON.stringify(l));
+  return l;
+}
+
+/** Meta mensal de comissão (o "cofre do mês" da tela). */
+function crmSetMeta(v) {
+  const n = Math.max(0, Math.round(Number(v) || 0));
+  PropertiesService.getScriptProperties().setProperty('CRM_META', String(n));
+  return n;
+}
+
+/** Página pública do QR code: confirma se a proposta foi emitida pela ASPIN (mostra só iniciais do credor). */
+function crmVerifica_(cod) {
+  const c = String(cod || '').toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 12);
+  const p = c.length >= 8 ? auxRows_('proposals').filter(function (r) { return String(r['Código'] || '').toUpperCase() === c; })[0] : null;
+  const e = function (s) { return String(s || '').replace(/[&<>"]/g, function (x) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[x]; }); };
+  const ini = p ? String(p['Credor'] || '').trim().split(/\s+/).filter(String).map(function (x) { return x[0].toUpperCase() + '.'; }).join(' ') : '';
+  const corpo = p
+    ? '<div class="ok">&#10003;</div><h1>Documento autêntico</h1><p>Esta proposta foi emitida pela <b>ASPIN Consultoria</b>.</p>' +
+      '<dl><dt>Código</dt><dd>' + e(c) + '</dd><dt>Emitida em</dt><dd>' + e(p['Data']) + '</dd><dt>Credor</dt><dd>' + e(ini) + '</dd><dt>Valor oferecido</dt><dd>R$ ' + e(p['Oferta ao credor (R$)']) + '</dd></dl>'
+    : '<div class="ok no">!</div><h1>Código não encontrado</h1><p>Não localizamos uma proposta da ASPIN com o código <b>' + e(c || '(vazio)') + '</b>.</p><p>Antes de assinar qualquer documento, fale com a ASPIN pelos canais oficiais.</p>';
+  const html = '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;800&display=swap" rel="stylesheet"><style>' +
+    'body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:Montserrat,Arial,sans-serif;background:radial-gradient(ellipse at 50% 40%,#16305C,#0A1832 60%,#050C1A);color:#fff;padding:20px;box-sizing:border-box}' +
+    '.card{max-width:440px;width:100%;text-align:center;border:1px solid rgba(227,181,85,.45);border-radius:20px;padding:30px 26px;background:rgba(255,255,255,.04)}' +
+    '.marca{font:600 12px Montserrat;letter-spacing:.4em;color:#E3B555;margin-bottom:18px}.ok{width:64px;height:64px;border-radius:50%;margin:0 auto 14px;display:flex;align-items:center;justify-content:center;font-size:32px;background:radial-gradient(circle at 35% 30%,#FFF1C9,#E3B555 45%,#B4780A);color:#0A1832;font-weight:800}' +
+    '.ok.no{background:#8E1B1B;color:#fff}h1{margin:0 0 8px;font-size:22px}p{color:#C9D2E3;font-size:14px;line-height:1.5}dl{display:grid;grid-template-columns:auto 1fr;gap:8px 14px;text-align:left;margin:18px 0 0;padding:16px;border-radius:12px;background:rgba(0,0,0,.2)}' +
+    'dt{color:#9FB0CC;font-size:12px;text-transform:uppercase;letter-spacing:.06em}dd{margin:0;font-weight:600;color:#F2D58C}</style></head><body><div class="card"><div class="marca">ASPIN CONSULTORIA</div>' + corpo + '</div></body></html>';
+  return HtmlService.createHtmlOutput(html).setTitle('ASPIN · Verificação de documento')
+    .setFaviconUrl(CRM_FAVICON).addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
 function agora_() {
@@ -577,7 +634,9 @@ function crmData() {
     reasons: col('B').length ? col('B') : LOSS_REASONS,
     owners: col('C').length ? col('C') : OWNERS,
     colors: STAGE_COLORS,
-    ddItems: DD_ITEMS,
+    ddItems: ddItens_(),
+    meta: Number(PropertiesService.getScriptProperties().getProperty('CRM_META')) || 0,
+    verificaUrl: CRM_LINK + '?app=verifica',
     dd: strip(auxRows_('dd')),
     buyers: strip(auxRows_('buyers')),
     contacts: strip(auxRows_('contacts')),
@@ -656,7 +715,7 @@ function crmSaveChecklist(id, credor, items) {
     const rows = auxRows_('dd').filter(function (r) { return r['ID interno'] === String(id); });
     rows.reverse().forEach(function (r) { sh.deleteRow(r._row); });
     (items || []).forEach(function (it) {
-      if (!it.situacao || it.situacao === 'Pendente' && !it.obs) {
+      if (!it.situacao || it.situacao === 'Pendente' && !it.obs && !it.extra) {
         return;
       }
       auxAppend_('dd', { 'ID interno': id, 'Credor': credor, 'Item': it.item, 'Situação': it.situacao,
@@ -716,7 +775,7 @@ function crmSaveProposal(id, credor, p) {
     const obj = { 'ID interno': id, 'Credor': credor, 'Data': agora_(), 'Valor de face (R$)': p.face,
       'Pagamento previsto': p.pagamento, 'Correção (% a.a.)': p.correcao, 'Taxa do comprador (% a.a.)': p.taxa,
       'Comissão ASPIN (%)': p.comissao, 'Preço ao comprador (R$)': p.preco, 'Oferta ao credor (R$)': p.oferta,
-      'Deságio (%)': p.desagio, 'Por': p.por };
+      'Deságio (%)': p.desagio, 'Por': p.por, 'Código': String(p.codigo || '').slice(0, 12) };
     auxAppend_('proposals', obj);
     const row = crmSaveUnlocked_(id, { 'Valor proposto (R$)': Number(p.oferta) });
     return { proposal: obj, row: row };
