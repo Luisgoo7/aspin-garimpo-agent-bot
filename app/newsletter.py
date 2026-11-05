@@ -37,11 +37,13 @@ STATE_KEY = "newsletter_radar"
 MAX_ITENS = 8
 MAX_CANDIDATOS = 30
 NOTA_MINIMA = 6
-LOGO_URL = "https://raw.githubusercontent.com/Luisgoo7/aspin-garimpo-agent-bot/main/docs/assets/aspin_logo_branco.png"
+LOGO_URL = "https://raw.githubusercontent.com/Luisgoo7/aspin-garimpo-agent-bot/main/docs/assets/aspin_logo_oficial.png"
 
-NAVY = "#1F3152"
-GOLD = "#B4780A"
-GOLD_LIGHT = "#E3B555"
+# Paleta oficial da ASPIN (logo de 04/11/2026): azul-marinho #0A1832 e dourado #D6A759.
+# GOLD é o tom escuro do dourado, legível como texto sobre fundo branco.
+NAVY = "#0A1832"
+GOLD = "#A8782A"
+GOLD_LIGHT = "#F6D58E"
 INK = "#1E2633"
 MUTED = "#5B6678"
 
@@ -561,11 +563,14 @@ def render_html(dia: date, edicao: int, itens: list[Item], destaques: list[str],
         f'<div style="display:none;max-height:0;overflow:hidden;">{_e(f"{len(itens)} notícias selecionadas e os indicadores do Banco Central.")}</div>'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#EEF0F4;"><tr><td align="center" style="padding:20px 8px;">'
         f'<table role="presentation" width="640" cellpadding="0" cellspacing="0" style="width:100%;max-width:640px;background:#FFFFFF;{fonte}color:{INK};">'
-        f'<tr><td style="background:{NAVY};padding:22px 32px 18px;">'
-        f'<img src="{LOGO_URL}" alt="ASPIN" height="34" style="display:block;height:34px;border:0;">'
-        f'<div style="font-family:Orbitron,Montserrat,Arial,sans-serif;color:{GOLD_LIGHT};font-size:12px;letter-spacing:3px;margin-top:12px;">RADAR ASPIN</div>'
-        f'<div style="color:#C9D1DE;font-size:12px;margin-top:4px;">{_e(data_extenso(dia))} · Edição nº {edicao:03d} · leitura de {minutos} min</div>'
-        f'</td></tr><tr><td style="background:{GOLD};height:4px;line-height:4px;font-size:0;">&nbsp;</td></tr>'
+        f'<tr><td style="background:{NAVY};padding:18px 32px 18px 22px;">'
+        f'<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
+        f'<td valign="middle" style="padding-right:18px;"><img src="{LOGO_URL}" alt="ASPIN Consultoria" width="102" height="90" style="display:block;width:102px;height:90px;border:0;"></td>'
+        f'<td valign="middle" style="border-left:1px solid #2A3A5C;padding-left:18px;">'
+        f'<div style="font-family:Cinzel,Georgia,serif;color:{GOLD_LIGHT};font-size:15px;letter-spacing:4px;">RADAR ASPIN</div>'
+        f'<div style="color:#C9D1DE;font-size:12px;margin-top:6px;">{_e(data_extenso(dia))} · Edição nº {edicao:03d} · leitura de {minutos} min</div>'
+        f'</td></tr></table>'
+        f'</td></tr><tr><td style="background:#D6A759;height:4px;line-height:4px;font-size:0;">&nbsp;</td></tr>'
     )
     if destaques:
         partes.append(_titulo_secao("Em 30 segundos"))
