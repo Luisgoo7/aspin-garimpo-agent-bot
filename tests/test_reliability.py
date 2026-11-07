@@ -501,7 +501,7 @@ async def test_digest_without_candidates_sends_single_notice(monkeypatch):
     monkeypatch.setattr(worker, "send_alert", sender)
     metrics = {"alerts": 0}
     await worker._deliver_digest(metrics, [], SLOT_TIME)
-    assert sender.await_count == 1 and "Nenhuma oportunidade" in sender.await_args.args[0]
+    assert sender.await_count == 1 and sender.await_args.args[0] == "Não houve oportunidades que se encaixassem nos requisitos."
 
 
 def test_transient_failure_is_partial_until_it_repeats(monkeypatch):
