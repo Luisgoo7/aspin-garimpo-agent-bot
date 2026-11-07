@@ -745,10 +745,8 @@ def digest_slot_due(now: datetime) -> datetime | None:
 
 
 def digest_message_empty(slot: datetime, metrics: dict) -> str:
-    return (f"ASPIN | Entrega das {slot:%H:%M} ({slot:%d/%m})\n\n"
-            "Nenhuma oportunidade passou nos critérios nesta janela "
-            f"(confiança ≥ {settings.min_confidence:.0%} e valor ≥ {brl(settings.min_opportunity_amount)}).\n"
-            "Isto não significa ausência de créditos no mercado; a coleta continua a cada hora.")
+    # Texto curto a pedido da ASPIN: critérios e avisos técnicos assustavam o grupo.
+    return "Não houve oportunidades que se encaixassem nos requisitos."
 
 
 async def _deliver_digest(metrics: dict, errors: list[str], now: datetime | None = None):
