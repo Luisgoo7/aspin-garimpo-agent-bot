@@ -121,3 +121,114 @@ async def test_enviar_usa_apps_script(monkeypatch):
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"ok": False, "error": "token inválido"}))) as client:
         with pytest.raises(RuntimeError, match="token inválido"):
             await nl.enviar(client, ["a@b.com"], "A", "h", "t")
+
+
+def _item(titulo="CNJ <regra> & cessão", link="https://x.jus.br/a?b=1&c=2"):
+    return nl.Item(fonte="CNJ", titulo=titulo, link=link, publicado=datetime(2026, 11, 3, 12), prioridade="alta",
+                   resumo="Resumo.", por_que_importa="Importa.")
+
+
+def test_telegram_escapa_html_e_omite_garimpo():
+    mensagens = nl.render_telegram(date(2026, 11, 3), 7, [_item()], ["Destaque"], [{"rotulo": "Selic", "valor": "13,75%", "nota": "ao ano"}])
+    texto = "\n".join(mensagens)
+    assert "CNJ &lt;regra&gt; &amp; cessão" in texto
+    assert 'href="https://x.jus.br/a?b=1&amp;c=2"' in texto
+    assert "Edição nº 007" in texto and "<b>13,75%</b>" in texto
+    assert "Garimpo" not in texto
+
+
+def test_telegram_divide_sem_cortar_bloco():
+    itens = [_item() for _ in range(12)]
+    for n, item in enumerate(itens):
+        item.titulo = f"Noticia{n} " + "palavra " * 30
+        item.resumo = "resumo " * 57
+        item.por_que_importa = "importa " * 32
+    mensagens = nl.render_telegram(date(2026, 11, 3), 1, itens, [], [])
+    assert len(mensagens) > 1 and all(len(m) <= nl.TELEGRAM_LIMITE for m in mensagens)
+    assert all(m.count("<b>") == m.count("</b>") and m.count("<a ") == m.count("</a>") for m in mensagens)
+    assert all(f"Noticia{n} " in "".join(mensagens) for n in range(12))
+
+
+async def test_enviar_telegram_devolve_o_que_faltou(monkeypatch):
+    monkeypatch.setattr(nl.settings, "telegram_bot_token", "tok")
+    recebidos = []
+
+    def responder(request):
+        corpo = json.loads(request.content)
+        recebidos.append(corpo)
+        if corpo["text"] == "b":
+            return httpx.Response(403, json={"ok": False, "description": "bot is not a member"})
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
+        assert await nl.enviar_telegram(client, "@radar", ["a", "b", "c"]) == ["b", "c"]
+    assert [r["text"] for r in recebidos] == ["a", "b"]
+    assert recebidos[0]["chat_id"] == "@radar" and recebidos[0]["parse_mode"] == "HTML"
+
+
+def _preparar_execucao(monkeypatch, estado, falha_email=None, faltam=()):
+    gravados, emails, canal = [], [], []
+
+    async def montar(hoje, est):
+        return {"assunto": "A", "html": "h", "texto": "t", "telegram": ["m1", "m2"], "itens": [_item()], "falhas": [],
+                "ia": "groq", "edicao": 3, "candidatos": 1}
+
+    async def enviar(client, para, titulo, corpo_html, corpo_texto):
+        emails.append(para)
+        if falha_email:
+            raise falha_email
+
+    async def publicar(client, chat, mensagens):
+        canal.append(list(mensagens))
+        return list(faltam)
+
+    async def avisar(client, texto):
+        return None
+
+    monkeypatch.setenv("NEWSLETTER_TO", "a@b.com")
+    monkeypatch.setenv("NEWSLETTER_TELEGRAM_CHAT", "@radar")
+    monkeypatch.setattr(nl, "dia_de_envio", lambda dia: True)
+    monkeypatch.setattr(nl, "ler_estado", lambda: estado)
+    monkeypatch.setattr(nl, "gravar_estado", gravados.append)
+    monkeypatch.setattr(nl, "montar_edicao", montar)
+    monkeypatch.setattr(nl, "enviar", enviar)
+    monkeypatch.setattr(nl, "enviar_telegram", publicar)
+    monkeypatch.setattr(nl, "avisar_telegram", avisar)
+    return gravados, emails, canal
+
+
+def _hoje():
+    return datetime.now(nl.TZ).date().isoformat()
+
+
+async def test_execucao_envia_nos_dois_canais(monkeypatch):
+    gravados, emails, canal = _preparar_execucao(monkeypatch, {})
+    assert await nl.executar() == 0
+    assert emails == [["a@b.com"]] and canal == [["m1", "m2"]]
+    assert gravados[-1]["ultimo_envio"] == _hoje() and gravados[-1]["telegram"] == {"dia": _hoje(), "pendente": []}
+
+
+async def test_falha_no_email_nao_impede_canal_nem_repete(monkeypatch):
+    gravados, emails, canal = _preparar_execucao(monkeypatch, {}, falha_email=RuntimeError("quota"))
+    with pytest.raises(RuntimeError, match="quota"):
+        await nl.executar()
+    assert canal == [["m1", "m2"]] and "ultimo_envio" not in gravados[-1]
+
+    _, emails, canal = _preparar_execucao(monkeypatch, gravados[-1])
+    assert await nl.executar() == 0
+    assert emails == [["a@b.com"]] and canal == []
+
+
+async def test_passada_seguinte_publica_so_pendencia_do_canal(monkeypatch):
+    estado = {"ultimo_envio": _hoje(), "edicao": 3, "telegram": {"dia": _hoje(), "pendente": ["m2"]}}
+    gravados, emails, canal = _preparar_execucao(monkeypatch, estado)
+    assert await nl.executar() == 0
+    assert emails == [] and canal == [["m2"]] and gravados[-1]["telegram"]["pendente"] == []
+    assert gravados[-1]["ultimo_envio"] == _hoje()
+
+
+async def test_sem_canal_configurado_so_email(monkeypatch):
+    gravados, emails, canal = _preparar_execucao(monkeypatch, {})
+    monkeypatch.delenv("NEWSLETTER_TELEGRAM_CHAT")
+    assert await nl.executar() == 0
+    assert emails == [["a@b.com"]] and canal == [] and gravados[-1]["ultimo_envio"] == _hoje()

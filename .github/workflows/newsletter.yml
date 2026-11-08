@@ -1,6 +1,6 @@
 name: Radar ASPIN (newsletter das 7h)
 
-# Dias úteis: monta e envia a newsletter por e-mail. Dois horários (06h40 e 07h20 de Brasília)
+# Dias úteis: monta e envia a newsletter por e-mail e no canal do Telegram. Dois horários (06h40 e 07h20 de Brasília)
 # porque o agendamento do GitHub pode atrasar; a segunda passada só envia se a primeira falhou.
 on:
   schedule:
@@ -40,6 +40,7 @@ jobs:
       NEWSLETTER_MAILER_TOKEN: ${{ secrets.NEWSLETTER_MAILER_TOKEN }}
       NEWSLETTER_FROM: ${{ vars.NEWSLETTER_FROM || 'aspininforma@gmail.com' }}
       NEWSLETTER_GARIMPO: ${{ vars.NEWSLETTER_GARIMPO || 'true' }}
+      NEWSLETTER_TELEGRAM_CHAT: ${{ vars.NEWSLETTER_TELEGRAM_CHAT || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
