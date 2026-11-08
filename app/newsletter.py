@@ -670,8 +670,9 @@ def _unir_blocos(blocos: list[str], limite: int = TELEGRAM_LIMITE) -> list[str]:
     return mensagens
 
 
-def render_telegram(dia: date, edicao: int, itens: list[Item], destaques: list[str], inds: list[dict]) -> list[str]:
-    """Versão do canal: mesmo conteúdo do e-mail, sem o bloco interno do Garimpo, em HTML do Telegram."""
+def render_telegram(dia: date, edicao: int, itens: list[Item], destaques: list[str], inds: list[dict],
+                    garimpo: dict | None = None) -> list[str]:
+    """Versão do canal (restrito aos membros da ASPIN): mesmo conteúdo do e-mail, em HTML do Telegram."""
     def e(texto: str) -> str:
         return html.escape(str(texto), quote=False)
 
@@ -696,6 +697,10 @@ def render_telegram(dia: date, edicao: int, itens: list[Item], destaques: list[s
             origem = " · ".join(p for p in (rotulo, item.fonte, quando) if p)
             linhas.append(f'{e(origem)} · <a href="{html.escape(item.link, quote=True)}">ler na fonte</a>')
             blocos.append("\n".join(linhas))
+    if garimpo is not None:
+        valor = f" · {_fmt_reais(garimpo['valor_aprovado'])} aprovados" if garimpo.get("valor_aprovado") else ""
+        blocos.append(f"<b>GARIMPO DO ÚLTIMO DIA ÚTIL</b>\n{garimpo['encontradas']} oportunidades encontradas · "
+                      f"{garimpo['aprovadas']} aprovadas{e(valor)}. Detalhes no CRM ASPIN.")
     blocos.append("<i>Radar ASPIN · ASPIN Consultoria. Resumos automáticos a partir de fontes públicas; confira a fonte antes de decidir.</i>")
     return _unir_blocos(blocos)
 
@@ -730,9 +735,27 @@ def canal_telegram() -> str:
     return os.environ.get("NEWSLETTER_TELEGRAM_CHAT", "").strip()
 
 
+def token_canal() -> str:
+    """Bot próprio do canal; sem ele, usa o bot do Garimpo."""
+    return os.environ.get("NEWSLETTER_TELEGRAM_BOT_TOKEN", "").strip() or settings.telegram_bot_token
+
+
+async def descobrir_canais(client: httpx.AsyncClient) -> dict[int, str]:
+    """Lista os canais em que o bot do Radar foi adicionado (id => título), para configurar canal privado."""
+    try:
+        resposta = await client.get(f"https://api.telegram.org/bot{token_canal()}/getUpdates", timeout=30)
+        dado = resposta.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise RuntimeError(f"canal: não foi possível consultar o Telegram ({type(exc).__name__})") from None
+    if not dado.get("ok"):
+        raise RuntimeError(f"canal: {str(dado.get('description') or 'consulta recusada')[:120]}")
+    chats = [(u.get("my_chat_member") or u.get("channel_post") or {}).get("chat") or {} for u in dado.get("result", [])]
+    return {c["id"]: str(c.get("title") or "") for c in chats if c.get("type") == "channel"}
+
+
 async def enviar_telegram(client: httpx.AsyncClient, canal: str, mensagens: list[str]) -> list[str]:
     """Publica as mensagens em ordem no canal. Devolve as que faltaram, para a próxima passada não repetir as já publicadas."""
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    url = f"https://api.telegram.org/bot{token_canal()}/sendMessage"
     for indice, mensagem in enumerate(mensagens):
         publicada = False
         for tentativa in range(3):
@@ -817,7 +840,7 @@ async def montar_edicao(hoje: date, estado: dict) -> dict:
         "assunto": assunto(hoje, itens, inds),
         "html": render_html(hoje, edicao, itens, destaques, inds, garimpo, falhas, remetente),
         "texto": render_texto(hoje, itens, destaques, inds),
-        "telegram": render_telegram(hoje, edicao, itens, destaques, inds),
+        "telegram": render_telegram(hoje, edicao, itens, destaques, inds, garimpo),
         "itens": itens, "falhas": falhas, "ia": ia, "edicao": edicao, "candidatos": len(candidatos),
     }
 
@@ -882,14 +905,27 @@ async def executar(dry_run: bool = False, forcar: bool = False, saida: str | Non
     return 0
 
 
+async def _mostrar_canais() -> int:
+    async with httpx.AsyncClient() as client:
+        canais = await descobrir_canais(client)
+    for chat_id, titulo in canais.items():
+        print(f"Canal: {chat_id} | {titulo}")
+    if not canais:
+        print("Nenhum canal encontrado: adicione o bot como administrador e publique uma mensagem no canal.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Radar ASPIN — newsletter diária")
     parser.add_argument("--dry-run", action="store_true", help="monta a edição sem enviar")
     parser.add_argument("--force", action="store_true", help="envia mesmo fora de dia útil ou se já enviou hoje")
     parser.add_argument("--out", help="grava o HTML da edição neste arquivo")
+    parser.add_argument("--descobrir-canal", action="store_true", help="mostra o id dos canais em que o bot foi adicionado")
     args = parser.parse_args(argv)
     logging.basicConfig(level=getattr(logging, str(settings.log_level).upper(), logging.INFO),
                         format="%(levelname)s %(name)s: %(message)s")
+    if args.descobrir_canal:
+        return asyncio.run(_mostrar_canais())
     return asyncio.run(executar(args.dry_run, args.force, args.out))
 
 

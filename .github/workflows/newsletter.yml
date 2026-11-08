@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       modo:
-        description: 'teste = monta sem enviar; enviar = envia agora (mesmo se já enviou hoje)'
+        description: 'teste = monta sem enviar; enviar = envia agora (mesmo se já enviou hoje); descobrir_canal = mostra o id do canal do Telegram'
         type: choice
-        options: [teste, enviar]
+        options: [teste, enviar, descobrir_canal]
         default: teste
 
 concurrency:
@@ -41,6 +41,7 @@ jobs:
       NEWSLETTER_FROM: ${{ vars.NEWSLETTER_FROM || 'aspininforma@gmail.com' }}
       NEWSLETTER_GARIMPO: ${{ vars.NEWSLETTER_GARIMPO || 'true' }}
       NEWSLETTER_TELEGRAM_CHAT: ${{ vars.NEWSLETTER_TELEGRAM_CHAT || '' }}
+      NEWSLETTER_TELEGRAM_BOT_TOKEN: ${{ secrets.NEWSLETTER_TELEGRAM_BOT_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,6 +59,7 @@ jobs:
           case "$MODO" in
             teste)  python -m app.newsletter --dry-run --force --out radar.html ;;
             enviar) python -m app.newsletter --force --out radar.html ;;
+            descobrir_canal) python -m app.newsletter --descobrir-canal ;;
             *)      python -m app.newsletter --out radar.html ;;
           esac
       - name: Guardar a edição (HTML) por 14 dias

@@ -128,13 +128,15 @@ def _item(titulo="CNJ <regra> & cessão", link="https://x.jus.br/a?b=1&c=2"):
                    resumo="Resumo.", por_que_importa="Importa.")
 
 
-def test_telegram_escapa_html_e_omite_garimpo():
-    mensagens = nl.render_telegram(date(2026, 11, 3), 7, [_item()], ["Destaque"], [{"rotulo": "Selic", "valor": "13,75%", "nota": "ao ano"}])
+def test_telegram_escapa_html_e_mostra_garimpo():
+    garimpo = {"encontradas": 12, "aprovadas": 3, "valor_aprovado": 0.0}
+    mensagens = nl.render_telegram(date(2026, 11, 3), 7, [_item()], ["Destaque"], [{"rotulo": "Selic", "valor": "13,75%", "nota": "ao ano"}], garimpo)
     texto = "\n".join(mensagens)
     assert "CNJ &lt;regra&gt; &amp; cessão" in texto
     assert 'href="https://x.jus.br/a?b=1&amp;c=2"' in texto
     assert "Edição nº 007" in texto and "<b>13,75%</b>" in texto
-    assert "Garimpo" not in texto
+    assert "12 oportunidades encontradas · 3 aprovadas" in texto
+    assert "GARIMPO" not in "\n".join(nl.render_telegram(date(2026, 11, 3), 7, [_item()], [], []))
 
 
 def test_telegram_divide_sem_cortar_bloco():
@@ -232,3 +234,20 @@ async def test_sem_canal_configurado_so_email(monkeypatch):
     monkeypatch.delenv("NEWSLETTER_TELEGRAM_CHAT")
     assert await nl.executar() == 0
     assert emails == [["a@b.com"]] and canal == [] and gravados[-1]["ultimo_envio"] == _hoje()
+
+
+async def test_descobrir_canais_usa_bot_proprio(monkeypatch):
+    monkeypatch.setenv("NEWSLETTER_TELEGRAM_BOT_TOKEN", "proprio")
+    monkeypatch.setattr(nl.settings, "telegram_bot_token", "garimpo")
+    urls = []
+
+    def responder(request):
+        urls.append(str(request.url))
+        return httpx.Response(200, json={"ok": True, "result": [
+            {"my_chat_member": {"chat": {"id": -1001, "type": "channel", "title": "Radar ASPIN"}}},
+            {"message": {"chat": {"id": 5, "type": "private"}}},
+        ]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
+        assert await nl.descobrir_canais(client) == {-1001: "Radar ASPIN"}
+    assert "/botproprio/getUpdates" in urls[0]
