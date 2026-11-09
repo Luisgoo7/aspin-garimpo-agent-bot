@@ -1,8 +1,8 @@
-"""Radar ASPIN: newsletter diária por e-mail com notícias do mercado de precatórios e créditos.
+"""Radar ASPIN: newsletter diária por e-mail e canal do Telegram com notícias do mercado de precatórios e créditos.
 
 Fluxo: coleta (RSS/Atom e páginas públicas) -> filtro por palavras-chave -> IA gratuita
 (Gemini, Groq ou NVIDIA) prioriza e resume -> checagem anti-invenção -> HTML -> envio pelo
-Apps Script da conta remetente (MailApp). Indicadores vêm direto do Banco Central, sem IA.
+Apps Script da conta remetente (MailApp) e pelo bot no canal. Indicadores vêm direto do Banco Central, sem IA.
 
 Uso: python -m app.newsletter [--dry-run] [--force] [--out arquivo.html]
 """
@@ -36,6 +36,7 @@ USER_AGENT = "RadarASPIN/1.0 (newsletter interna ASPIN Consultoria; 1 leitura/di
 STATE_KEY = "newsletter_radar"
 MAX_ITENS = 8
 MAX_CANDIDATOS = 30
+TELEGRAM_LIMITE = 3900
 NOTA_MINIMA = 6
 LOGO_URL = "https://raw.githubusercontent.com/Luisgoo7/aspin-garimpo-agent-bot/main/docs/assets/aspin_logo_oficial.png"
 
@@ -654,6 +655,56 @@ def render_texto(dia: date, itens: list[Item], destaques: list[str], inds: list[
     return "\n".join(linhas)
 
 
+def _unir_blocos(blocos: list[str], limite: int = TELEGRAM_LIMITE) -> list[str]:
+    """Agrupa blocos em mensagens dentro do limite do Telegram, sem cortar um bloco (e suas tags) ao meio."""
+    mensagens: list[str] = []
+    atual = ""
+    for bloco in blocos:
+        if atual and len(atual) + 2 + len(bloco) > limite:
+            mensagens.append(atual)
+            atual = bloco
+        else:
+            atual = f"{atual}\n\n{bloco}" if atual else bloco
+    if atual:
+        mensagens.append(atual)
+    return mensagens
+
+
+def render_telegram(dia: date, edicao: int, itens: list[Item], destaques: list[str], inds: list[dict],
+                    garimpo: dict | None = None) -> list[str]:
+    """Versão do canal (restrito aos membros da ASPIN): mesmo conteúdo do e-mail, em HTML do Telegram."""
+    def e(texto: str) -> str:
+        return html.escape(str(texto), quote=False)
+
+    blocos = [f"<b>RADAR ASPIN</b>\n{e(data_extenso(dia))} · Edição nº {edicao:03d}"]
+    if destaques:
+        blocos.append("<b>EM 30 SEGUNDOS</b>\n" + "\n".join(f"• {e(d)}" for d in destaques))
+    if inds:
+        blocos.append("<b>INDICADORES</b>\n" + "\n".join(f"{e(i['rotulo'])}: <b>{e(i['valor'])}</b> ({e(i['nota'])})" for i in inds))
+    if not itens:
+        blocos.append("Sem novidades relevantes nas fontes monitoradas.")
+    for chave, nome in SECOES.items():
+        da_secao = [i for i in itens if i.secao == chave]
+        for n, item in enumerate(da_secao):
+            rotulo = PRIORIDADES.get(item.prioridade, PRIORIDADES["informativo"])[0]
+            linhas = [f"<b>{e(nome.upper())}</b>\n"] if n == 0 else []
+            linhas.append(f"<b>{e(_cortar(item.titulo, 300))}</b>")
+            if item.resumo:
+                linhas.append(e(item.resumo))
+            if item.por_que_importa:
+                linhas.append(f"<i>Por que importa:</i> {e(item.por_que_importa)}")
+            quando = item.publicado.astimezone(TZ).strftime("%d/%m/%Y") if item.publicado else ""
+            origem = " · ".join(p for p in (rotulo, item.fonte, quando) if p)
+            linhas.append(f'{e(origem)} · <a href="{html.escape(item.link, quote=True)}">ler na fonte</a>')
+            blocos.append("\n".join(linhas))
+    if garimpo is not None:
+        valor = f" · {_fmt_reais(garimpo['valor_aprovado'])} aprovados" if garimpo.get("valor_aprovado") else ""
+        blocos.append(f"<b>GARIMPO DO ÚLTIMO DIA ÚTIL</b>\n{garimpo['encontradas']} oportunidades encontradas · "
+                      f"{garimpo['aprovadas']} aprovadas{e(valor)}. Detalhes no CRM ASPIN.")
+    blocos.append("<i>Radar ASPIN · ASPIN Consultoria. Resumos automáticos a partir de fontes públicas; confira a fonte antes de decidir.</i>")
+    return _unir_blocos(blocos)
+
+
 # --------------------------------------------------------------------------- envio
 
 
@@ -678,6 +729,58 @@ async def enviar(client: httpx.AsyncClient, para: list[str], titulo: str, corpo_
         raise RuntimeError(f"envio: resposta inesperada (HTTP {resposta.status_code})") from None
     if not dado.get("ok"):
         raise RuntimeError(f"envio recusado: {str(dado.get('error') or 'sem detalhe')[:120]}")
+
+
+def canal_telegram() -> str:
+    return os.environ.get("NEWSLETTER_TELEGRAM_CHAT", "").strip()
+
+
+def token_canal() -> str:
+    """Bot próprio do canal; sem ele, usa o bot do Garimpo."""
+    return os.environ.get("NEWSLETTER_TELEGRAM_BOT_TOKEN", "").strip() or settings.telegram_bot_token
+
+
+async def descobrir_canais(client: httpx.AsyncClient) -> dict[int, str]:
+    """Lista os canais em que o bot do Radar foi adicionado (id => título), para configurar canal privado."""
+    try:
+        resposta = await client.get(f"https://api.telegram.org/bot{token_canal()}/getUpdates", timeout=30)
+        dado = resposta.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise RuntimeError(f"canal: não foi possível consultar o Telegram ({type(exc).__name__})") from None
+    if not dado.get("ok"):
+        raise RuntimeError(f"canal: {str(dado.get('description') or 'consulta recusada')[:120]}")
+    chats = [(u.get("my_chat_member") or u.get("channel_post") or {}).get("chat") or {} for u in dado.get("result", [])]
+    return {c["id"]: str(c.get("title") or "") for c in chats if c.get("type") == "channel"}
+
+
+async def enviar_telegram(client: httpx.AsyncClient, canal: str, mensagens: list[str]) -> list[str]:
+    """Publica as mensagens em ordem no canal. Devolve as que faltaram, para a próxima passada não repetir as já publicadas."""
+    url = f"https://api.telegram.org/bot{token_canal()}/sendMessage"
+    for indice, mensagem in enumerate(mensagens):
+        publicada = False
+        for tentativa in range(3):
+            try:
+                resposta = await client.post(url, json={"chat_id": canal, "text": mensagem, "parse_mode": "HTML",
+                                                        "disable_web_page_preview": True}, timeout=30)
+            except httpx.HTTPError as exc:
+                # Só o tipo do erro: a mensagem da exceção traz a URL, que contém o token.
+                log.warning("canal: falha de conexão (%s)", type(exc).__name__)
+                await asyncio.sleep(2 ** tentativa)
+                continue
+            if resposta.status_code == 200:
+                publicada = True
+                break
+            try:
+                dado = resposta.json()
+            except ValueError:
+                dado = {}
+            log.warning("canal: HTTP %s: %s", resposta.status_code, str(dado.get("description") or "")[:120])
+            if resposta.status_code != 429 and resposta.status_code < 500:
+                break
+            await asyncio.sleep(min(60, max(1, int((dado.get("parameters") or {}).get("retry_after") or 2 ** tentativa))))
+        if not publicada:
+            return mensagens[indice:]
+    return []
 
 
 async def avisar_telegram(client: httpx.AsyncClient, texto: str) -> None:
@@ -737,6 +840,7 @@ async def montar_edicao(hoje: date, estado: dict) -> dict:
         "assunto": assunto(hoje, itens, inds),
         "html": render_html(hoje, edicao, itens, destaques, inds, garimpo, falhas, remetente),
         "texto": render_texto(hoje, itens, destaques, inds),
+        "telegram": render_telegram(hoje, edicao, itens, destaques, inds, garimpo),
         "itens": itens, "falhas": falhas, "ia": ia, "edicao": edicao, "candidatos": len(candidatos),
     }
 
@@ -747,8 +851,19 @@ async def executar(dry_run: bool = False, forcar: bool = False, saida: str | Non
         log.info("hoje (%s) não é dia útil: sem edição", hoje)
         return 0
     estado = ler_estado()
+    canal = canal_telegram()
+    anterior = estado.get("telegram") or {}
     if not forcar and not dry_run and estado.get("ultimo_envio") == hoje.isoformat():
-        log.info("edição de hoje já enviada")
+        pendente = anterior.get("pendente") if anterior.get("dia") == hoje.isoformat() else None
+        if not (canal and pendente):
+            log.info("edição de hoje já enviada")
+            return 0
+        async with httpx.AsyncClient(timeout=60) as client:
+            faltam = await enviar_telegram(client, canal, pendente)
+            if faltam:
+                await avisar_telegram(client, "Radar ASPIN: o canal do Telegram não recebeu a edição de hoje; o e-mail saiu normalmente.")
+        gravar_estado({**estado, "telegram": {"dia": hoje.isoformat(), "pendente": faltam}})
+        print("Canal do Telegram: pendência " + ("mantida." if faltam else "publicada."))
         return 0
     edicao = await montar_edicao(hoje, estado)
     if saida:
@@ -760,20 +875,56 @@ async def executar(dry_run: bool = False, forcar: bool = False, saida: str | Non
     if dry_run:
         return 0
     para = destinatarios()
+    telegram = anterior
+    falha_email: Exception | None = None
+    # Canais independentes: a falha de um não impede o outro.
     async with httpx.AsyncClient(timeout=60) as client:
-        if not para:
-            await avisar_telegram(client, "Radar ASPIN: nenhum destinatário configurado (NEWSLETTER_TO).")
-            raise SystemExit("NEWSLETTER_TO vazio")
         try:
+            if not para:
+                raise RuntimeError("nenhum destinatário configurado (NEWSLETTER_TO)")
             await enviar(client, para, edicao["assunto"], edicao["html"], edicao["texto"])
         except Exception as exc:
+            falha_email = exc
             await avisar_telegram(client, f"Radar ASPIN: falha no envio de hoje ({str(exc)[:150]}). Nova tentativa no próximo agendamento.")
-            raise
+        if canal:
+            # Numa nova passada do mesmo dia, publica só o que faltou (nada, se o canal já recebeu tudo).
+            mesmo_dia = not forcar and anterior.get("dia") == hoje.isoformat()
+            mensagens = (anterior.get("pendente") or []) if mesmo_dia else edicao["telegram"]
+            faltam = await enviar_telegram(client, canal, mensagens) if mensagens else []
+            telegram = {"dia": hoje.isoformat(), "pendente": faltam}
+            if faltam:
+                await avisar_telegram(client, "Radar ASPIN: falha ao publicar no canal do Telegram. Nova tentativa no próximo agendamento.")
+    if falha_email is not None:
+        if canal:
+            gravar_estado({**estado, "telegram": telegram})
+        raise falha_email
     links = [i.link for i in edicao["itens"]] + list(estado.get("links", []))
     gravar_estado({"ultimo_envio": hoje.isoformat(), "edicao": edicao["edicao"], "links": links[:400],
-                   "ultima_ia": edicao["ia"], "itens": len(edicao["itens"])})
-    print(f"Enviado para {len(para)} destinatário(s).")
+                   "ultima_ia": edicao["ia"], "itens": len(edicao["itens"]), "telegram": telegram})
+    print(f"Enviado para {len(para)} destinatário(s)." + (" Canal do Telegram: " + ("pendente." if telegram.get("pendente") else "publicado.") if canal else ""))
     return 0
+
+
+async def _mostrar_canais() -> int:
+    async with httpx.AsyncClient() as client:
+        canais = await descobrir_canais(client)
+    for chat_id, titulo in canais.items():
+        print(f"Canal: {chat_id} | {titulo}")
+    if not canais:
+        print("Nenhum canal encontrado: adicione o bot como administrador e publique uma mensagem no canal.")
+    return 0
+
+
+async def testar_canal() -> int:
+    """Publica uma prévia da edição só no canal: não envia e-mail nem altera o estado."""
+    canal = canal_telegram()
+    if not canal:
+        raise SystemExit("NEWSLETTER_TELEGRAM_CHAT vazio")
+    edicao = await montar_edicao(datetime.now(TZ).date(), ler_estado())
+    async with httpx.AsyncClient(timeout=60) as client:
+        faltam = await enviar_telegram(client, canal, ["<b>TESTE do Radar ASPIN</b>\nPrévia de como a edição chega ao canal."] + edicao["telegram"])
+    print("Canal do Telegram: teste " + ("incompleto." if faltam else "publicado."))
+    return 1 if faltam else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -781,9 +932,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="monta a edição sem enviar")
     parser.add_argument("--force", action="store_true", help="envia mesmo fora de dia útil ou se já enviou hoje")
     parser.add_argument("--out", help="grava o HTML da edição neste arquivo")
+    parser.add_argument("--descobrir-canal", action="store_true", help="mostra o id dos canais em que o bot foi adicionado")
+    parser.add_argument("--testar-canal", action="store_true", help="publica uma prévia só no canal, sem e-mail")
     args = parser.parse_args(argv)
     logging.basicConfig(level=getattr(logging, str(settings.log_level).upper(), logging.INFO),
                         format="%(levelname)s %(name)s: %(message)s")
+    if args.descobrir_canal:
+        return asyncio.run(_mostrar_canais())
+    if args.testar_canal:
+        return asyncio.run(testar_canal())
     return asyncio.run(executar(args.dry_run, args.force, args.out))
 
 
