@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       modo:
-        description: 'teste = monta sem enviar; enviar = envia agora (mesmo se já enviou hoje); descobrir_canal = mostra o id do canal do Telegram'
+        description: 'teste = monta sem enviar; enviar = envia agora (mesmo se já enviou hoje); descobrir_canal = mostra o id do canal do Telegram; testar_canal = publica uma prévia só no canal'
         type: choice
-        options: [teste, enviar, descobrir_canal]
+        options: [teste, enviar, descobrir_canal, testar_canal]
         default: teste
 
 concurrency:
@@ -60,6 +60,7 @@ jobs:
             teste)  python -m app.newsletter --dry-run --force --out radar.html ;;
             enviar) python -m app.newsletter --force --out radar.html ;;
             descobrir_canal) python -m app.newsletter --descobrir-canal ;;
+            testar_canal) python -m app.newsletter --testar-canal ;;
             *)      python -m app.newsletter --out radar.html ;;
           esac
       - name: Guardar a edição (HTML) por 14 dias

@@ -251,3 +251,10 @@ async def test_descobrir_canais_usa_bot_proprio(monkeypatch):
     async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
         assert await nl.descobrir_canais(client) == {-1001: "Radar ASPIN"}
     assert "/botproprio/getUpdates" in urls[0]
+
+
+async def test_testar_canal_nao_envia_email_nem_grava(monkeypatch):
+    gravados, emails, canal = _preparar_execucao(monkeypatch, {})
+    assert await nl.testar_canal() == 0
+    assert emails == [] and gravados == []
+    assert len(canal) == 1 and "TESTE" in canal[0][0] and canal[0][1:] == ["m1", "m2"]

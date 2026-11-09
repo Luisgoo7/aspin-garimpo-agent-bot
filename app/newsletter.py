@@ -915,17 +915,32 @@ async def _mostrar_canais() -> int:
     return 0
 
 
+async def testar_canal() -> int:
+    """Publica uma prévia da edição só no canal: não envia e-mail nem altera o estado."""
+    canal = canal_telegram()
+    if not canal:
+        raise SystemExit("NEWSLETTER_TELEGRAM_CHAT vazio")
+    edicao = await montar_edicao(datetime.now(TZ).date(), ler_estado())
+    async with httpx.AsyncClient(timeout=60) as client:
+        faltam = await enviar_telegram(client, canal, ["<b>TESTE do Radar ASPIN</b>\nPrévia de como a edição chega ao canal."] + edicao["telegram"])
+    print("Canal do Telegram: teste " + ("incompleto." if faltam else "publicado."))
+    return 1 if faltam else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Radar ASPIN — newsletter diária")
     parser.add_argument("--dry-run", action="store_true", help="monta a edição sem enviar")
     parser.add_argument("--force", action="store_true", help="envia mesmo fora de dia útil ou se já enviou hoje")
     parser.add_argument("--out", help="grava o HTML da edição neste arquivo")
     parser.add_argument("--descobrir-canal", action="store_true", help="mostra o id dos canais em que o bot foi adicionado")
+    parser.add_argument("--testar-canal", action="store_true", help="publica uma prévia só no canal, sem e-mail")
     args = parser.parse_args(argv)
     logging.basicConfig(level=getattr(logging, str(settings.log_level).upper(), logging.INFO),
                         format="%(levelname)s %(name)s: %(message)s")
     if args.descobrir_canal:
         return asyncio.run(_mostrar_canais())
+    if args.testar_canal:
+        return asyncio.run(testar_canal())
     return asyncio.run(executar(args.dry_run, args.force, args.out))
 
 
