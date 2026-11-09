@@ -1,7 +1,8 @@
 name: Radar ASPIN (newsletter das 7h)
 
-# Dias úteis: monta e envia a newsletter por e-mail e no canal do Telegram. Dois horários (06h40 e 07h20 de Brasília)
-# porque o agendamento do GitHub pode atrasar; a segunda passada só envia se a primeira falhou.
+# Dias úteis: monta e envia a newsletter por e-mail e no canal do Telegram. O robô sempre ligado dispara às
+# 06h50 e 07h20 de Brasília (modo agendado); o cron abaixo fica de reserva porque o GitHub chega a atrasar 7 horas.
+# Só envia o que ainda não saiu no dia.
 on:
   schedule:
     - cron: '40 9 * * 1-5'
@@ -9,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       modo:
-        description: 'teste = monta sem enviar; enviar = envia agora (mesmo se já enviou hoje); descobrir_canal = mostra o id do canal do Telegram; testar_canal = publica uma prévia só no canal'
+        description: 'teste = monta sem enviar; enviar = envia agora (mesmo se já enviou hoje); descobrir_canal = mostra o id do canal do Telegram; testar_canal = publica uma prévia só no canal; agendado = envio normal do dia'
         type: choice
-        options: [teste, enviar, descobrir_canal, testar_canal]
+        options: [teste, enviar, descobrir_canal, testar_canal, agendado]
         default: teste
 
 concurrency:
