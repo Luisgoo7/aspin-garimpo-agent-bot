@@ -1,5 +1,6 @@
 """Robô sempre ligado: cliques em tempo real, coleta quando devida e passagem a outros jobs."""
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -35,6 +36,8 @@ def daemon_env(monkeypatch):
     monkeypatch.setattr(worker, "queued_runs", AsyncMock(return_value=[]))
     monkeypatch.setattr(worker, "_deliver_digest_now", AsyncMock())
     monkeypatch.setattr(worker, "retention_job", AsyncMock(return_value={}))
+    monkeypatch.setattr(worker, "newsletter_slot_due", lambda now=None: None)
+    monkeypatch.setattr(worker, "dispatch_newsletter", AsyncMock(return_value=True))
     return clock, polls
 
 
@@ -167,3 +170,40 @@ async def test_retention_job_marks_unanswered_messages_as_expired(monkeypatch):
     report = await worker.retention_job(vacuum_full=True)
     assert report == {"mensagens_expiradas": 1, "oportunidades_removidas": 1} and vac == [True]
     assert buttons.await_args.args[2]["inline_keyboard"][0][0]["text"] == "⌛ Expirou (48h)"
+
+
+@pytest.mark.parametrize("quando,esperado", [
+    ("2026-11-09T09:49:00+00:00", None),  # segunda, 06h49 em Brasília
+    ("2026-11-09T09:50:00+00:00", "2026-11-09T06:50"),
+    ("2026-11-09T10:14:59+00:00", "2026-11-09T06:50"),
+    ("2026-11-09T10:15:00+00:00", None),
+    ("2026-11-09T10:20:00+00:00", "2026-11-09T07:20"),
+    ("2026-11-08T09:55:00+00:00", None),  # domingo
+])
+def test_newsletter_slot_due(quando, esperado):
+    assert worker.newsletter_slot_due(datetime.fromisoformat(quando)) == esperado
+
+
+@pytest.mark.asyncio
+async def test_daemon_dispara_radar_uma_vez_por_horario(monkeypatch, daemon_env):
+    monkeypatch.setattr(worker, "collector_dispatch_reason", lambda: None)
+    monkeypatch.setattr(worker, "newsletter_slot_due", lambda now=None: "2026-11-09T06:50")
+    await worker.run_daemon(max_minutes=3)
+    assert worker.dispatch_newsletter.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_daemon_nao_cede_runner_para_o_radar(monkeypatch, daemon_env):
+    monkeypatch.setattr(worker, "collector_dispatch_reason", lambda: None)
+    monkeypatch.setattr(worker, "queued_runs", AsyncMock(return_value=[{"path": ".github/workflows/newsletter.yml"}]))
+    totals = await worker.run_daemon(max_minutes=15)
+    assert totals["minutes"] >= 15
+
+
+@pytest.mark.asyncio
+async def test_dispatch_newsletter_usa_modo_agendado(monkeypatch):
+    chamada = AsyncMock(return_value=SimpleNamespace(status_code=204))
+    monkeypatch.setattr(worker, "_github", chamada)
+    assert await worker.dispatch_newsletter() is True
+    assert chamada.await_args.kwargs["json"]["inputs"] == {"modo": "agendado"}
+    assert "newsletter.yml/dispatches" in chamada.await_args.args[1]

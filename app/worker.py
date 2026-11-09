@@ -1053,6 +1053,32 @@ async def dispatch_collector(reason: str) -> bool:
 
 
 DAEMON_WORKFLOW = "robo.yml"
+NEWSLETTER_WORKFLOW = "newsletter.yml"
+# Radar ASPIN: a primeira passada entrega antes das 7h; a segunda só age se a primeira falhou.
+NEWSLETTER_SLOTS = ((6, 50), (7, 20))
+NEWSLETTER_SLOT_MINUTES = 25
+
+
+def newsletter_slot_due(now: datetime | None = None) -> str | None:
+    """Horário do Radar em aberto agora (dias úteis), pois o cron do GitHub chega a atrasar 7 horas."""
+    local = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(settings.digest_timezone))
+    if local.weekday() >= 5:
+        return None
+    for hora, minuto in NEWSLETTER_SLOTS:
+        inicio = local.replace(hour=hora, minute=minuto, second=0, microsecond=0)
+        if inicio <= local < inicio + timedelta(minutes=NEWSLETTER_SLOT_MINUTES):
+            return f"{local:%Y-%m-%d}T{hora:02d}:{minuto:02d}"
+    return None
+
+
+async def dispatch_newsletter() -> bool:
+    """Dispara o Radar sem forçar: a própria newsletter ignora o que já foi enviado no dia."""
+    response = await _github("POST", f"actions/workflows/{NEWSLETTER_WORKFLOW}/dispatches",
+                             json={"ref": os.environ.get("GITHUB_REF_NAME") or "main", "inputs": {"modo": "agendado"}})
+    if response is None or response.status_code >= 300:
+        log.warning("Robô: não conseguiu disparar o Radar (HTTP %s)", getattr(response, "status_code", "sem token"))
+        return False
+    return True
 
 
 async def _github(method: str, path: str, **kwargs):
@@ -1124,6 +1150,7 @@ async def run_daemon(max_minutes: float) -> dict:
     cycle: asyncio.Task | None = None
     last_queue_check = started
     last_retention = float("-inf")
+    newsletter_disparada = None
     yielding = False
     while True:
         now = time.monotonic()
@@ -1147,6 +1174,15 @@ async def run_daemon(max_minutes: float) -> dict:
             except Exception as exc:
                 totals["errors"] += 1
                 log.warning("Robô: entrega adiada: %s", storage.safe_error(exc))
+        slot_radar = newsletter_slot_due()
+        if slot_radar is not None and slot_radar != newsletter_disparada:
+            try:
+                if await dispatch_newsletter():
+                    newsletter_disparada = slot_radar
+                    log.info("Robô: Radar disparado (%s)", slot_radar)
+            except Exception as exc:
+                totals["errors"] += 1
+                log.warning("Robô: Radar adiado: %s", type(exc).__name__)
         if cycle is None and not yielding and now < deadline - settings.cycle_timeout_seconds:
             try:
                 reason = collector_dispatch_reason()
@@ -1166,7 +1202,8 @@ async def run_daemon(max_minutes: float) -> dict:
         now = time.monotonic()
         if not yielding and now - last_queue_check >= settings.daemon_queue_check_seconds:
             last_queue_check = now
-            others = [r for r in await queued_runs() if not str(r.get("path", "")).endswith(DAEMON_WORKFLOW)]
+            # O Radar roda em runner do GitHub: não disputa o runner com o robô.
+            others = [r for r in await queued_runs() if not str(r.get("path", "")).endswith((DAEMON_WORKFLOW, NEWSLETTER_WORKFLOW))]
             if others:
                 log.info("Robô: outra execução aguardando o runner; encerrando para dar passagem")
                 yielding = True
